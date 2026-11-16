@@ -1,0 +1,777 @@
+'use strict';
+
+const $ = (sel) => document.querySelector(sel);
+
+const store = {
+  get(key, fallback) {
+    try { const v = localStorage.getItem(key); return v == null ? fallback : JSON.parse(v); } catch { return fallback; }
+  },
+  set(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* armazenamento indisponível */ }
+  },
+};
+
+const QUALITY = {
+  game1080: { label: 'Jogo · 1080p 60fps', width: 1920, height: 1080, fps: 60, bitrate: 8_000_000, hint: 'motion' },
+  game720: { label: 'Jogo · 720p 60fps', width: 1280, height: 720, fps: 60, bitrate: 4_500_000, hint: 'motion' },
+  text1080: { label: 'Texto/código · 1080p 30fps', width: 1920, height: 1080, fps: 30, bitrate: 4_000_000, hint: 'detail' },
+  light720: { label: 'Leve · 720p 30fps', width: 1280, height: 720, fps: 30, bitrate: 2_000_000, hint: 'motion' },
+};
+
+const SPEAK_THRESHOLD = 0.035;
+
+const state = {
+  myId: null,
+  roomName: null,
+  peers: new Map(),   // id -> peer
+  tiles: new Map(),   // id -> { el, video, name }
+  focusId: null,
+  mic: null,
+  screen: null,
+  quality: null,
+  iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+  audioCtx: null,
+  meters: new Map(),  // key -> { src, analyser, buf, cb }
+  speaking: new Map(),
+};
+
+const socket = io();
+
+fetch('/api/config')
+  .then((r) => r.json())
+  .then((cfg) => { if (cfg.iceServers) state.iceServers = cfg.iceServers; })
+  .catch(() => {});
+
+/* ================= utilidades ================= */
+
+let toastTimer;
+function toast(text) {
+  const el = $('#toast');
+  el.textContent = text;
+  el.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.hidden = true; }, 3500);
+}
+
+function initial(name) {
+  return (name || '?').trim().charAt(0).toUpperCase() || '?';
+}
+
+function colorFor(id) {
+  let h = 0;
+  for (const c of String(id)) h = (h * 31 + c.charCodeAt(0)) % 360;
+  return `hsl(${h} 70% 70%)`;
+}
+
+function micConstraints() {
+  const deviceId = $('#micSelect').value;
+  const clean = $('#nsToggle').checked;
+  return {
+    audio: {
+      deviceId: deviceId ? { exact: deviceId } : undefined,
+      noiseSuppression: clean,
+      echoCancellation: clean,
+      autoGainControl: true,
+    },
+  };
+}
+
+/* ================= medidor de áudio ================= */
+
+function audioCtx() {
+  if (!state.audioCtx) state.audioCtx = new AudioContext();
+  if (state.audioCtx.state === 'suspended') state.audioCtx.resume();
+  return state.audioCtx;
+}
+
+function watchLevel(key, stream, cb) {
+  unwatchLevel(key);
+  if (!stream || !stream.getAudioTracks().length) return;
+  const ctx = audioCtx();
+  const src = ctx.createMediaStreamSource(stream);
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 512;
+  src.connect(analyser);
+  state.meters.set(key, { src, analyser, buf: new Uint8Array(analyser.fftSize), cb });
+}
+
+function unwatchLevel(key) {
+  const m = state.meters.get(key);
+  if (!m) return;
+  m.src.disconnect();
+  state.meters.delete(key);
+}
+
+(function meterLoop() {
+  for (const m of state.meters.values()) {
+    m.analyser.getByteTimeDomainData(m.buf);
+    let sum = 0;
+    for (const v of m.buf) { const x = (v - 128) / 128; sum += x * x; }
+    m.cb(Math.sqrt(sum / m.buf.length));
+  }
+  requestAnimationFrame(meterLoop);
+})();
+
+function setSpeaking(id, on) {
+  if (state.speaking.get(id) === on) return;
+  state.speaking.set(id, on);
+  state.tiles.get(id)?.el.classList.toggle('speaking', on);
+  document.querySelector(`#peopleList li[data-id="${CSS.escape(id)}"]`)?.classList.toggle('speaking', on);
+}
+
+/* ================= lobby ================= */
+
+const params = new URLSearchParams(location.search);
+$('#nameInput').value = store.get('name', '');
+$('#roomInput').value = params.get('sala') || store.get('lastRoom', '');
+$('#nsToggle').checked = store.get('ns', true);
+
+async function listMics() {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const sel = $('#micSelect');
+    const current = sel.value || store.get('mic', '');
+    sel.innerHTML = '<option value="">Padrão do sistema</option>';
+    devices
+      .filter((d) => d.kind === 'audioinput' && d.deviceId && d.deviceId !== 'default' && d.deviceId !== 'communications')
+      .forEach((d, i) => sel.add(new Option(d.label || `Microfone ${i + 1}`, d.deviceId)));
+    if ([...sel.options].some((o) => o.value === current)) sel.value = current;
+  } catch { /* sem permissão ainda */ }
+}
+listMics();
+
+let testStream = null;
+const loopAudio = new Audio();
+
+async function startMicTest() {
+  try {
+    testStream = await navigator.mediaDevices.getUserMedia(micConstraints());
+  } catch {
+    showJoinError('Não foi possível acessar o microfone. Verifique a permissão do navegador.');
+    return;
+  }
+  await listMics();
+  watchLevel('test', testStream, (lvl) => { $('#micMeter').style.width = `${Math.min(100, lvl * 400)}%`; });
+  loopAudio.srcObject = $('#loopToggle').checked ? testStream : null;
+  loopAudio.play().catch(() => {});
+  $('#micTestBtn').textContent = 'Parar teste';
+}
+
+function stopMicTest() {
+  if (!testStream) return;
+  unwatchLevel('test');
+  testStream.getTracks().forEach((t) => t.stop());
+  testStream = null;
+  loopAudio.srcObject = null;
+  $('#micMeter').style.width = '0';
+  $('#micTestBtn').textContent = 'Testar microfone';
+}
+
+$('#micTestBtn').onclick = () => (testStream ? stopMicTest() : startMicTest());
+$('#loopToggle').onchange = (e) => { loopAudio.srcObject = e.target.checked && testStream ? testStream : null; loopAudio.play().catch(() => {}); };
+$('#micSelect').onchange = () => { store.set('mic', $('#micSelect').value); if (testStream) { stopMicTest(); startMicTest(); } };
+$('#nsToggle').onchange = () => { store.set('ns', $('#nsToggle').checked); if (testStream) { stopMicTest(); startMicTest(); } };
+
+function showJoinError(text) {
+  const el = $('#joinError');
+  el.textContent = text;
+  el.hidden = !text;
+}
+
+/* ---------- favoritas ---------- */
+
+const favs = () => store.get('favs', []);
+const isFav = (name) => favs().some((f) => f.toLowerCase() === name.trim().toLowerCase());
+
+function updateFavBtn() {
+  const name = $('#roomInput').value.trim();
+  const on = Boolean(name) && isFav(name);
+  $('#favBtn').textContent = on ? '★' : '☆';
+  $('#favBtn').classList.toggle('on', on);
+}
+
+$('#favBtn').onclick = () => {
+  const name = $('#roomInput').value.trim();
+  if (!name) { toast('Digite o nome da sala primeiro.'); return; }
+  const list = favs();
+  store.set('favs', isFav(name) ? list.filter((f) => f.toLowerCase() !== name.toLowerCase()) : [...list, name]);
+  updateFavBtn();
+  refreshFavs();
+};
+$('#roomInput').oninput = updateFavBtn;
+
+async function refreshFavs() {
+  const list = favs();
+  $('#favCount').textContent = list.length;
+  $('#favEmpty').hidden = list.length > 0;
+  let status = [];
+  if (list.length) {
+    try {
+      const qs = list.map((n) => `n=${encodeURIComponent(n)}`).join('&');
+      status = await (await fetch(`/api/rooms?${qs}`)).json();
+    } catch { /* offline */ }
+  }
+  const ul = $('#favList');
+  ul.innerHTML = '';
+  list.forEach((name, i) => {
+    const s = status[i] || { online: 0, live: false, locked: false };
+    const li = document.createElement('li');
+    const nm = document.createElement('span');
+    nm.className = 'fav-name';
+    nm.textContent = (s.locked ? '🔒 ' : '') + name;
+    const st = document.createElement('span');
+    st.className = `fav-status${s.live ? ' live' : ''}`;
+    st.textContent = s.live ? `● AO VIVO · ${s.online}` : s.online ? `${s.online} online` : 'vazia';
+    const rm = document.createElement('button');
+    rm.type = 'button';
+    rm.className = 'fav-remove';
+    rm.title = 'Remover';
+    rm.textContent = '×';
+    rm.onclick = (e) => {
+      e.stopPropagation();
+      store.set('favs', favs().filter((f) => f !== name));
+      updateFavBtn();
+      refreshFavs();
+    };
+    li.append(nm, st, rm);
+    li.onclick = () => { $('#roomInput').value = name; updateFavBtn(); $('#nameInput').focus(); };
+    ul.append(li);
+  });
+}
+
+updateFavBtn();
+refreshFavs();
+setInterval(() => { if (!$('#lobby').hidden) refreshFavs(); }, 5000);
+
+/* ---------- entrar ---------- */
+
+$('#joinForm').onsubmit = async (e) => {
+  e.preventDefault();
+  const room = $('#roomInput').value.trim();
+  const name = $('#nameInput').value.trim();
+  const password = $('#passInput').value;
+  if (!room || !name) return;
+  store.set('name', name);
+  store.set('lastRoom', room);
+  showJoinError('');
+  stopMicTest();
+  audioCtx(); // destrava o áudio com o gesto do usuário
+
+  const btn = $('#joinBtn');
+  btn.disabled = true;
+
+  try {
+    state.mic = await navigator.mediaDevices.getUserMedia(micConstraints());
+  } catch {
+    state.mic = null;
+    toast('Entrando sem microfone.');
+  }
+
+  socket.timeout(8000).emit('join', {
+    room, name, password,
+    micStreamId: state.mic?.id || null,
+    muted: false,
+  }, (err, res) => {
+    btn.disabled = false;
+    if (err || !res?.ok) {
+      state.mic?.getTracks().forEach((t) => t.stop());
+      state.mic = null;
+      showJoinError(err ? 'Servidor não respondeu. Tente de novo.' : res.error);
+      return;
+    }
+    enterRoom(res, name);
+  });
+};
+
+/* ================= sala ================= */
+
+const qualitySelect = $('#qualitySelect');
+for (const [key, q] of Object.entries(QUALITY)) qualitySelect.add(new Option(q.label, key));
+qualitySelect.value = QUALITY[store.get('quality')] ? store.get('quality') : 'game1080';
+
+function enterRoom(res, myName) {
+  state.myId = res.id;
+  state.myName = myName;
+  state.roomName = res.room;
+  $('#lobby').hidden = true;
+  $('#room').hidden = false;
+  $('#roomName').textContent = res.room;
+  $('#lockIcon').hidden = !res.locked;
+  history.replaceState(null, '', `?sala=${encodeURIComponent(res.room)}`);
+  document.title = `${res.room} · Na Tela`;
+
+  createTile(state.myId, `${myName} (você)`, true);
+  if (state.mic) watchLevel(state.myId, state.mic, (lvl) => setSpeaking(state.myId, micOn() && lvl > SPEAK_THRESHOLD));
+  res.peers.forEach(addPeer);
+  updateMicBtn();
+  updateShareBtn();
+  renderPeople();
+  sysMsg(`Você entrou em "${res.room}".`);
+}
+
+function leaveRoom(reason) {
+  if (!state.myId) return;
+  socket.emit('leave');
+  for (const peer of state.peers.values()) closePeer(peer);
+  state.peers.clear();
+  state.screen?.getTracks().forEach((t) => t.stop());
+  state.mic?.getTracks().forEach((t) => t.stop());
+  state.screen = null;
+  state.mic = null;
+  for (const key of [...state.meters.keys()]) unwatchLevel(key);
+  state.speaking.clear();
+  state.tiles.clear();
+  state.focusId = null;
+  $('#stage').innerHTML = '';
+  $('#stage').classList.remove('has-focus');
+  $('#chatLog').innerHTML = '';
+  $('#peopleList').innerHTML = '';
+  state.myId = null;
+  $('#room').hidden = true;
+  $('#lobby').hidden = false;
+  document.title = 'Na Tela — transmita sua tela para os amigos';
+  refreshFavs();
+  if (reason) toast(reason);
+}
+
+$('#leaveBtn').onclick = () => leaveRoom();
+
+socket.on('disconnect', () => {
+  if (state.myId) leaveRoom('Conexão com o servidor perdida.');
+});
+
+$('#copyLinkBtn').onclick = async () => {
+  const url = `${location.origin}/?sala=${encodeURIComponent(state.roomName)}`;
+  try {
+    await navigator.clipboard.writeText(url);
+    toast('Link de convite copiado!');
+  } catch {
+    prompt('Copie o link:', url);
+  }
+};
+
+/* ---------- tiles ---------- */
+
+function createTile(id, name, isSelf) {
+  const el = $('#tileTpl').content.firstElementChild.cloneNode(true);
+  const video = el.querySelector('video');
+  el.classList.toggle('self', isSelf);
+  el.querySelector('.avatar span').textContent = initial(name);
+  el.querySelector('.avatar span').style.color = colorFor(id);
+  el.querySelector('.tile-name').textContent = name;
+  el.querySelector('.vol input').oninput = (e) => { video.volume = Number(e.target.value); };
+  el.querySelector('.vol').onclick = (e) => e.stopPropagation();
+  el.querySelector('.fs').onclick = (e) => { e.stopPropagation(); toggleFullscreen(el); };
+  el.onclick = () => {
+    if (video.muted && !isSelf) { video.muted = false; return; }
+    setFocus(state.focusId === id ? null : id);
+  };
+  el.ondblclick = () => toggleFullscreen(el);
+  $('#stage').append(el);
+  state.tiles.set(id, { el, video });
+  updateCount();
+}
+
+function removeTile(id) {
+  const tile = state.tiles.get(id);
+  if (!tile) return;
+  tile.video.srcObject = null;
+  tile.el.remove();
+  state.tiles.delete(id);
+  if (state.focusId === id) setFocus(null);
+  updateCount();
+}
+
+function setTileVideo(id, stream, isSelf) {
+  const tile = state.tiles.get(id);
+  if (!tile) return;
+  const { el, video } = tile;
+  if (stream) {
+    if (video.srcObject !== stream) {
+      video.srcObject = stream;
+      video.muted = isSelf;
+      video.play().catch(() => {
+        // Autoplay com som bloqueado: toca mudo e pede um clique.
+        video.muted = true;
+        video.play().catch(() => {});
+        toast('Clique na transmissão para ativar o som.');
+      });
+    }
+    el.classList.add('has-video');
+    if (!state.focusId && !isSelf) setFocus(id);
+  } else {
+    video.srcObject = null;
+    el.classList.remove('has-video');
+    if (state.focusId === id) setFocus(null);
+  }
+}
+
+function setFocus(id) {
+  if (state.focusId) state.tiles.get(state.focusId)?.el.classList.remove('focused');
+  state.focusId = id && state.tiles.has(id) ? id : null;
+  if (state.focusId) state.tiles.get(state.focusId).el.classList.add('focused');
+  $('#stage').classList.toggle('has-focus', Boolean(state.focusId));
+}
+
+function toggleFullscreen(el) {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else el.requestFullscreen?.().catch(() => {});
+}
+
+function updateCount() {
+  const n = state.tiles.size;
+  $('#peerCount').textContent = `${n} ${n === 1 ? 'pessoa' : 'pessoas'}`;
+}
+
+/* ---------- participantes ---------- */
+
+function renderPeople() {
+  const ul = $('#peopleList');
+  ul.innerHTML = '';
+  const me = { id: state.myId, name: `${state.myName} (você)`, muted: !micOn(), sharing: Boolean(state.screen), self: true };
+  [me, ...state.peers.values()].forEach((p) => {
+    const li = document.createElement('li');
+    li.dataset.id = p.id;
+    li.classList.toggle('speaking', Boolean(state.speaking.get(p.id)));
+    const av = document.createElement('span');
+    av.className = 'av';
+    av.textContent = initial(p.name);
+    av.style.color = colorFor(p.id);
+    const nm = document.createElement('span');
+    nm.className = 'nm';
+    nm.textContent = p.name;
+    const tags = document.createElement('span');
+    tags.className = 'tags';
+    if (p.sharing) tags.insertAdjacentHTML('beforeend', '<span class="tag-live">AO VIVO</span>');
+    if (p.muted || (!p.self && !p.micStreamId)) tags.insertAdjacentHTML('beforeend', '<span title="Microfone desligado">🔇</span>');
+    li.append(av, nm, tags);
+    if (!p.self) {
+      const vol = document.createElement('input');
+      vol.type = 'range';
+      vol.min = 0; vol.max = 1; vol.step = 0.05;
+      vol.value = p.voiceVolume;
+      vol.title = 'Volume da voz';
+      vol.oninput = () => { p.voiceVolume = Number(vol.value); p.voiceAudio.volume = p.voiceVolume; };
+      li.append(vol);
+    }
+    ul.append(li);
+  });
+  state.tiles.get(state.myId)?.el.querySelector('.tile-name').classList.toggle('muted', !micOn());
+  for (const p of state.peers.values()) {
+    state.tiles.get(p.id)?.el.querySelector('.tile-name').classList.toggle('muted', p.muted || !p.micStreamId);
+  }
+}
+
+/* ---------- WebRTC (perfect negotiation, malha P2P) ---------- */
+
+// Força Opus estéreo e bitrate maior: o som do jogo chega em estéreo.
+function preferStereo(sdp) {
+  return sdp.replace(/a=fmtp:(\d+) (.*useinbandfec=1.*)/g, (line, pt, fmtp) =>
+    (fmtp.includes('stereo=1') ? line : `a=fmtp:${pt} ${fmtp};stereo=1;sprop-stereo=1;maxaveragebitrate=192000`));
+}
+
+function addPeer(info) {
+  if (state.peers.has(info.id)) return;
+  const pc = new RTCPeerConnection({ iceServers: state.iceServers });
+  const peer = {
+    id: info.id,
+    name: info.name,
+    sharing: Boolean(info.sharing),
+    muted: Boolean(info.muted),
+    screenStreamId: info.screenStreamId || null,
+    micStreamId: info.micStreamId || null,
+    pc,
+    polite: state.myId > info.id,
+    makingOffer: false,
+    ignoreOffer: false,
+    streams: new Map(),
+    screenSenders: [],
+    voiceAudio: new Audio(),
+    voiceVolume: 1,
+  };
+  peer.voiceAudio.autoplay = true;
+  state.peers.set(peer.id, peer);
+
+  pc.onnegotiationneeded = async () => {
+    try {
+      peer.makingOffer = true;
+      await pc.setLocalDescription();
+      socket.emit('signal', { to: peer.id, data: { description: pc.localDescription } });
+    } catch (err) {
+      console.error('negociação', err);
+    } finally {
+      peer.makingOffer = false;
+    }
+  };
+  pc.onicecandidate = ({ candidate }) => {
+    if (candidate) socket.emit('signal', { to: peer.id, data: { candidate } });
+  };
+  pc.oniceconnectionstatechange = () => {
+    if (pc.iceConnectionState === 'failed') pc.restartIce();
+  };
+  pc.ontrack = ({ track, streams }) => {
+    const stream = streams[0];
+    if (!stream) return;
+    peer.streams.set(stream.id, stream);
+    stream.onremovetrack = () => updatePeerMedia(peer);
+    track.onunmute = () => updatePeerMedia(peer);
+    updatePeerMedia(peer);
+  };
+
+  state.mic?.getTracks().forEach((t) => pc.addTrack(t, state.mic));
+  if (state.screen) addScreenTo(peer);
+
+  createTile(peer.id, peer.name, false);
+  renderPeople();
+}
+
+function closePeer(peer) {
+  peer.pc.close();
+  peer.voiceAudio.srcObject = null;
+  unwatchLevel(peer.id);
+  state.speaking.delete(peer.id);
+  removeTile(peer.id);
+}
+
+function updatePeerMedia(peer) {
+  const mic = peer.micStreamId && peer.streams.get(peer.micStreamId);
+  if (mic && peer.voiceAudio.srcObject !== mic) {
+    peer.voiceAudio.srcObject = mic;
+    peer.voiceAudio.volume = peer.voiceVolume;
+    peer.voiceAudio.play().catch(() => {});
+    watchLevel(peer.id, mic, (lvl) => setSpeaking(peer.id, !peer.muted && lvl > SPEAK_THRESHOLD));
+  }
+  const screen = peer.sharing && peer.screenStreamId && peer.streams.get(peer.screenStreamId);
+  const hasVideo = screen && screen.getVideoTracks().some((t) => t.readyState === 'live');
+  setTileVideo(peer.id, hasVideo ? screen : null, false);
+}
+
+socket.on('signal', async ({ from, data }) => {
+  const peer = state.peers.get(from);
+  if (!peer) return;
+  const { pc } = peer;
+  try {
+    if (data.description) {
+      const desc = { type: data.description.type, sdp: preferStereo(data.description.sdp) };
+      const collision = desc.type === 'offer' && (peer.makingOffer || pc.signalingState !== 'stable');
+      peer.ignoreOffer = !peer.polite && collision;
+      if (peer.ignoreOffer) return;
+      await pc.setRemoteDescription(desc);
+      if (desc.type === 'offer') {
+        await pc.setLocalDescription();
+        socket.emit('signal', { to: from, data: { description: pc.localDescription } });
+      }
+    } else if (data.candidate) {
+      try {
+        await pc.addIceCandidate(data.candidate);
+      } catch (err) {
+        if (!peer.ignoreOffer) throw err;
+      }
+    }
+  } catch (err) {
+    console.error('sinalização', err);
+  }
+});
+
+socket.on('peer-joined', (info) => {
+  if (!state.myId) return;
+  addPeer(info);
+  sysMsg(`${info.name} entrou.`);
+});
+
+socket.on('peer-left', ({ id }) => {
+  const peer = state.peers.get(id);
+  if (!peer) return;
+  closePeer(peer);
+  state.peers.delete(id);
+  renderPeople();
+  sysMsg(`${peer.name} saiu.`);
+});
+
+socket.on('peer-state', ({ id, ...patch }) => {
+  const peer = state.peers.get(id);
+  if (!peer) return;
+  const wasSharing = peer.sharing;
+  Object.assign(peer, patch);
+  updatePeerMedia(peer);
+  renderPeople();
+  if (peer.sharing && !wasSharing) sysMsg(`${peer.name} começou a transmitir.`);
+  if (!peer.sharing && wasSharing) sysMsg(`${peer.name} parou de transmitir.`);
+});
+
+/* ---------- microfone ---------- */
+
+const micOn = () => Boolean(state.mic?.getAudioTracks()[0]?.enabled);
+
+async function toggleMic() {
+  if (!state.mic) {
+    try {
+      state.mic = await navigator.mediaDevices.getUserMedia(micConstraints());
+    } catch {
+      toast('Microfone indisponível. Verifique a permissão do navegador.');
+      return;
+    }
+    // Avisa o id do stream antes de mandar as faixas, para os outros reconhecerem.
+    socket.emit('state', { micStreamId: state.mic.id, muted: false });
+    for (const peer of state.peers.values()) state.mic.getTracks().forEach((t) => peer.pc.addTrack(t, state.mic));
+    watchLevel(state.myId, state.mic, (lvl) => setSpeaking(state.myId, micOn() && lvl > SPEAK_THRESHOLD));
+  } else {
+    const track = state.mic.getAudioTracks()[0];
+    track.enabled = !track.enabled;
+    socket.emit('state', { muted: !track.enabled });
+  }
+  updateMicBtn();
+  renderPeople();
+}
+
+function updateMicBtn() {
+  const on = micOn();
+  $('#micBtn').classList.toggle('off', !on);
+  $('#micBtn span').textContent = on ? 'Microfone' : 'Mudo';
+}
+
+$('#micBtn').onclick = toggleMic;
+
+document.addEventListener('keydown', (e) => {
+  if ($('#room').hidden || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) return;
+  if (e.key.toLowerCase() === 'm') toggleMic();
+});
+
+/* ---------- compartilhar tela ---------- */
+
+function addScreenTo(peer) {
+  const stream = state.screen;
+  const q = state.quality;
+  peer.screenSenders = stream.getTracks().map((track) => {
+    if (track.kind === 'video') {
+      return peer.pc.addTransceiver(track, {
+        direction: 'sendonly',
+        streams: [stream],
+        sendEncodings: [{ maxBitrate: q.bitrate, maxFramerate: q.fps }],
+      }).sender;
+    }
+    return peer.pc.addTrack(track, stream);
+  });
+}
+
+async function startShare() {
+  const q = QUALITY[qualitySelect.value];
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getDisplayMedia({
+      video: { width: { ideal: q.width }, height: { ideal: q.height }, frameRate: { ideal: q.fps, max: q.fps } },
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, sampleRate: 48000 },
+      systemAudio: 'include',
+      selfBrowserSurface: 'exclude',
+      surfaceSwitching: 'include',
+    });
+  } catch (err) {
+    if (err.name !== 'NotAllowedError') toast('Não foi possível capturar a tela.');
+    return;
+  }
+  if (!state.myId) { stream.getTracks().forEach((t) => t.stop()); return; }
+
+  const video = stream.getVideoTracks()[0];
+  video.contentHint = q.hint;
+  video.onended = stopShare;
+  stream.getAudioTracks().forEach((t) => { t.contentHint = 'music'; });
+
+  state.screen = stream;
+  state.quality = q;
+  socket.emit('state', { sharing: true, screenStreamId: stream.id });
+  for (const peer of state.peers.values()) addScreenTo(peer);
+  setTileVideo(state.myId, stream, true);
+  updateShareBtn();
+  renderPeople();
+  if (!stream.getAudioTracks().length) toast('Transmitindo sem áudio. Para enviar o som, marque "Compartilhar áudio" ao escolher a tela/aba.');
+}
+
+function stopShare() {
+  if (!state.screen) return;
+  state.screen.getTracks().forEach((t) => t.stop());
+  for (const peer of state.peers.values()) {
+    peer.screenSenders.forEach((sender) => { try { peer.pc.removeTrack(sender); } catch { /* conexão fechada */ } });
+    peer.screenSenders = [];
+  }
+  state.screen = null;
+  socket.emit('state', { sharing: false, screenStreamId: null });
+  setTileVideo(state.myId, null, true);
+  updateShareBtn();
+  renderPeople();
+}
+
+function updateShareBtn() {
+  const on = Boolean(state.screen);
+  $('#shareBtn').classList.toggle('sharing', on);
+  $('#shareBtn span').textContent = on ? 'Parar transmissão' : 'Transmitir tela';
+}
+
+$('#shareBtn').onclick = () => (state.screen ? stopShare() : startShare());
+
+// Troca de qualidade durante a transmissão, sem reiniciar.
+qualitySelect.onchange = async () => {
+  store.set('quality', qualitySelect.value);
+  if (!state.screen) return;
+  const q = QUALITY[qualitySelect.value];
+  state.quality = q;
+  const video = state.screen.getVideoTracks()[0];
+  video.contentHint = q.hint;
+  await video.applyConstraints({ width: { ideal: q.width }, height: { ideal: q.height }, frameRate: { ideal: q.fps, max: q.fps } }).catch(() => {});
+  for (const peer of state.peers.values()) {
+    for (const sender of peer.screenSenders) {
+      if (sender.track?.kind !== 'video') continue;
+      const p = sender.getParameters();
+      if (!p.encodings?.length) continue;
+      p.encodings[0].maxBitrate = q.bitrate;
+      p.encodings[0].maxFramerate = q.fps;
+      await sender.setParameters(p).catch(() => {});
+    }
+  }
+  toast(`Qualidade: ${q.label}`);
+};
+
+/* ---------- chat ---------- */
+
+const isMobile = () => matchMedia('(max-width: 860px)').matches;
+const chatVisible = () => (isMobile() ? $('#room').classList.contains('side-open') : !$('#room').classList.contains('side-hidden'));
+
+$('#sideBtn').onclick = () => {
+  $('#room').classList.toggle(isMobile() ? 'side-open' : 'side-hidden');
+  if (chatVisible()) { $('#unread').hidden = true; $('#chatInput').focus(); }
+};
+
+$('#chatForm').onsubmit = (e) => {
+  e.preventDefault();
+  const text = $('#chatInput').value.trim();
+  if (!text) return;
+  socket.emit('chat', text);
+  $('#chatInput').value = '';
+};
+
+function appendLog(el) {
+  const log = $('#chatLog');
+  const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+  log.append(el);
+  if (atBottom) log.scrollTop = log.scrollHeight;
+}
+
+socket.on('chat', ({ id, name, text }) => {
+  const div = document.createElement('div');
+  div.className = 'msg';
+  const b = document.createElement('b');
+  b.textContent = id === state.myId ? 'Você' : name;
+  b.style.color = colorFor(id);
+  const span = document.createElement('span');
+  span.textContent = text;
+  div.append(b, span);
+  appendLog(div);
+  if (!chatVisible() && id !== state.myId) $('#unread').hidden = false;
+});
+
+function sysMsg(text) {
+  const div = document.createElement('div');
+  div.className = 'sys';
+  div.textContent = text;
+  appendLog(div);
+}

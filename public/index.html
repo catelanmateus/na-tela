@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Na Tela — transmita sua tela para os amigos</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%237c5cff'/%3E%3Cpath d='M9 7l8 5-8 5z' fill='white'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- LOBBY -->
+  <section id="lobby" class="lobby">
+    <header class="brand">
+      <div class="logo">
+        <svg viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/><path class="fill" d="M10 8l5 2.5-5 2.5z"/></svg>
+      </div>
+      <h1>Na Tela</h1>
+      <p>Transmita sua tela para os amigos com áudio, voz e chat — direto do navegador.</p>
+    </header>
+
+    <div class="lobby-grid">
+      <form id="joinForm" class="card" autocomplete="off">
+        <label class="field">
+          <span>Nome da sala</span>
+          <div class="input-row">
+            <input id="roomInput" maxlength="40" placeholder="ex: jogatina-da-noite" required>
+            <button type="button" id="favBtn" class="icon-btn" title="Favoritar sala" aria-label="Favoritar sala">☆</button>
+          </div>
+        </label>
+        <label class="field">
+          <span>Seu nome</span>
+          <input id="nameInput" maxlength="30" placeholder="Como vão te chamar" required>
+        </label>
+        <label class="field">
+          <span>Senha da sala <em>(opcional)</em></span>
+          <input id="passInput" type="password" placeholder="Em branco = sala aberta" autocomplete="new-password">
+        </label>
+
+        <div class="mic-box">
+          <div class="mic-row">
+            <span class="mic-label">Microfone</span>
+            <select id="micSelect"><option value="">Padrão do sistema</option></select>
+          </div>
+          <div class="meter"><div id="micMeter"></div></div>
+          <div class="mic-row">
+            <button type="button" id="micTestBtn" class="ghost small">Testar microfone</button>
+            <label class="check" title="Use fone de ouvido para não dar microfonia">
+              <input type="checkbox" id="loopToggle"> Ouvir minha voz
+            </label>
+          </div>
+          <label class="check">
+            <input type="checkbox" id="nsToggle" checked> Supressão de ruído e eco
+          </label>
+        </div>
+
+        <p id="joinError" class="error" hidden></p>
+        <button class="primary" id="joinBtn">Entrar na sala <span aria-hidden="true">→</span></button>
+
+        <ul class="feats">
+          <li><b>WebRTC P2P</b><span>baixa latência</span></li>
+          <li><b>Até 60 FPS</b><span>até 1080p</span></li>
+          <li><b>Áudio estéreo</b><span>som do jogo</span></li>
+        </ul>
+      </form>
+
+      <aside class="card favs">
+        <div class="favs-head">
+          <div>
+            <h2>Salas favoritas</h2>
+            <p class="muted">Status ao vivo</p>
+          </div>
+          <span id="favCount" class="pill">0</span>
+        </div>
+        <ul id="favList" class="fav-list"></ul>
+        <div id="favEmpty" class="empty">
+          <div class="empty-star">☆</div>
+          <p><b>Nenhuma sala salva ainda</b></p>
+          <p class="muted">Digite o nome de uma sala e clique na ☆ para fixá-la aqui.</p>
+        </div>
+      </aside>
+    </div>
+  </section>
+
+  <!-- SALA -->
+  <section id="room" class="room" hidden>
+    <header class="room-bar">
+      <div class="room-title">
+        <span class="live-dot"></span>
+        <strong id="roomName"></strong>
+        <span id="lockIcon" title="Sala com senha" hidden>🔒</span>
+        <span id="peerCount" class="pill"></span>
+      </div>
+      <button id="copyLinkBtn" class="ghost small">Copiar convite</button>
+    </header>
+
+    <main class="room-main">
+      <div id="stage" class="stage"></div>
+
+      <aside id="sidebar" class="sidebar">
+        <div class="side-section">
+          <h3>Na sala</h3>
+          <ul id="peopleList" class="people"></ul>
+        </div>
+        <div class="side-section chat">
+          <h3>Chat</h3>
+          <div id="chatLog" class="chat-log"></div>
+          <form id="chatForm" class="chat-form">
+            <input id="chatInput" maxlength="500" placeholder="Mensagem…" autocomplete="off">
+          </form>
+        </div>
+      </aside>
+    </main>
+
+    <footer class="controls">
+      <button id="micBtn" class="ctl" title="Microfone (M)">
+        <svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/><path class="slash" d="M4 4l16 16"/></svg>
+        <span>Microfone</span>
+      </button>
+      <div class="share-group">
+        <select id="qualitySelect" title="Qualidade da transmissão"></select>
+        <button id="shareBtn" class="ctl accent">
+          <svg viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+          <span>Transmitir tela</span>
+        </button>
+      </div>
+      <button id="sideBtn" class="ctl" title="Chat e participantes">
+        <svg viewBox="0 0 24 24"><path d="M4 5h16v11H9l-5 4z"/></svg>
+        <span>Chat</span><i id="unread" class="badge" hidden></i>
+      </button>
+      <button id="leaveBtn" class="ctl danger">
+        <svg viewBox="0 0 24 24"><path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/></svg>
+        <span>Sair</span>
+      </button>
+    </footer>
+  </section>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <template id="tileTpl">
+    <div class="tile">
+      <video playsinline autoplay></video>
+      <div class="avatar"><span></span></div>
+      <div class="tile-bar">
+        <span class="tile-name"></span>
+        <span class="live-badge">AO VIVO</span>
+        <label class="vol" title="Volume da transmissão">🔊<input type="range" min="0" max="1" step="0.05" value="1"></label>
+        <button class="fs" title="Tela cheia">⛶</button>
+      </div>
+    </div>
+  </template>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
