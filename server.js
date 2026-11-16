@@ -3,22 +3,45 @@ const http = require('http');
 const crypto = require('crypto');
 const express = require('express');
 const { Server } = require('socket.io');
+const { AccessToken, RoomServiceClient } = require('livekit-server-sdk');
 
 const PORT = process.env.PORT || 3000;
-// Conexões são P2P em malha (cada um envia para todos), então salas pequenas.
-const MAX_PEERS = Number(process.env.MAX_PEERS) || 10;
+
+// Com LiveKit (SFU), quem transmite envia um único fluxo e o servidor repassa.
+// Sem ele, a mídia vai P2P em malha (cada um envia para todos).
+const LIVEKIT = process.env.LIVEKIT_URL && process.env.LIVEKIT_API_KEY && process.env.LIVEKIT_API_SECRET
+  ? { url: process.env.LIVEKIT_URL, key: process.env.LIVEKIT_API_KEY, secret: process.env.LIVEKIT_API_SECRET }
+  : null;
+const roomService = LIVEKIT
+  ? new RoomServiceClient(LIVEKIT.url.replace(/^ws/, 'http'), LIVEKIT.key, LIVEKIT.secret)
+  : null;
+
+// Na malha P2P o upload de quem transmite cresce com cada espectador, então salas pequenas.
+const MAX_PEERS = Number(process.env.MAX_PEERS) || (LIVEKIT ? 30 : 10);
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { maxHttpBufferSize: 1e6 });
 
 app.use(express.static(path.join(__dirname, 'public')));
+// Cliente do LiveKit servido daqui (versão travada pelo package-lock, sem CDN).
+const LIVEKIT_CLIENT = path.join(path.dirname(require.resolve('livekit-client')), 'livekit-client.umd.js');
+app.get('/vendor/livekit-client.js', (req, res) => res.sendFile(LIVEKIT_CLIENT, { maxAge: '1d' }));
 
 // key (nome em minúsculas) -> { name, salt, passHash, peers: Map<socketId, {name, sharing, muted, screenStreamId, micStreamId}> }
 const rooms = new Map();
 
 const roomKey = (name) => String(name || '').trim().toLowerCase();
 const hashPassword = (password, salt) => crypto.scryptSync(password, salt, 32).toString('hex');
+// Prefixo para não misturar com outras salas do mesmo projeto LiveKit.
+const sfuRoomName = (key) => `na-tela:${key}`;
+
+// O token só sai depois da senha conferida, e só vale para esta sala.
+async function sfuToken(key, identity, name) {
+  const at = new AccessToken(LIVEKIT.key, LIVEKIT.secret, { identity, name, ttl: '12h' });
+  at.addGrant({ roomJoin: true, room: sfuRoomName(key), canPublish: true, canSubscribe: true, canPublishData: false });
+  return at.toJwt();
+}
 
 function iceServers() {
   const list = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }];
@@ -32,7 +55,7 @@ function iceServers() {
   return list;
 }
 
-app.get('/api/config', (req, res) => res.json({ iceServers: iceServers(), maxPeers: MAX_PEERS }));
+app.get('/api/config', (req, res) => res.json({ iceServers: iceServers(), maxPeers: MAX_PEERS, sfu: Boolean(LIVEKIT) }));
 
 // Status das salas favoritas: /api/rooms?n=sala1&n=sala2
 app.get('/api/rooms', (req, res) => {
@@ -67,7 +90,7 @@ function pickState(patch) {
 io.on('connection', (socket) => {
   let currentKey = null;
 
-  socket.on('join', (payload, ack) => {
+  socket.on('join', async (payload, ack) => {
     if (typeof ack !== 'function') return;
     if (currentKey) return ack({ error: 'Você já está em uma sala.' });
 
@@ -77,6 +100,20 @@ io.on('connection', (socket) => {
     if (!roomName) return ack({ error: 'Informe o nome da sala.' });
 
     const key = roomKey(roomName);
+    // O token é gerado antes das checagens (é assíncrono) e só é entregue se elas passarem,
+    // assim a validação da sala abaixo continua síncrona e sem corrida.
+    let livekit = null;
+    if (LIVEKIT) {
+      try {
+        livekit = { url: LIVEKIT.url, token: await sfuToken(key, socket.id, displayName) };
+      } catch (err) {
+        console.error('livekit token', err);
+        return ack({ error: 'Falha ao preparar a transmissão. Tente de novo.' });
+      }
+      if (!socket.connected) return;
+      if (currentKey) return ack({ error: 'Você já está em uma sala.' });
+    }
+
     let room = rooms.get(key);
     if (!room) {
       // Quem cria a sala define a senha.
@@ -96,7 +133,7 @@ io.on('connection', (socket) => {
     socket.join(key);
     // Emitido antes do ack: os outros já conhecem o novo par quando a oferta WebRTC dele chegar.
     socket.to(key).emit('peer-joined', { id: socket.id, ...me });
-    ack({ ok: true, id: socket.id, room: room.name, locked: Boolean(room.passHash), peers });
+    ack({ ok: true, id: socket.id, room: room.name, locked: Boolean(room.passHash), peers, livekit });
   });
 
   socket.on('signal', (msg) => {
@@ -128,6 +165,8 @@ io.on('connection', (socket) => {
     if (room) {
       room.peers.delete(socket.id);
       socket.to(currentKey).emit('peer-left', { id: socket.id });
+      // Quem saiu da sala não continua recebendo vídeo pelo SFU.
+      roomService?.removeParticipant(sfuRoomName(currentKey), socket.id).catch(() => {});
       if (room.peers.size === 0) rooms.delete(currentKey);
     }
     socket.leave(currentKey);

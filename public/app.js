@@ -43,13 +43,20 @@ const state = {
   audioCtx: null,
   meters: new Map(),  // key -> { src, analyser, buf, cb }
   speaking: new Map(),
+  sfu: null,          // { room, micPub, screenPubs } quando a mídia passa pelo LiveKit
 };
 
 const socket = io();
 
 fetch('/api/config')
   .then((r) => r.json())
-  .then((cfg) => { if (cfg.iceServers) state.iceServers = cfg.iceServers; })
+  .then((cfg) => {
+    if (cfg.iceServers) state.iceServers = cfg.iceServers;
+    if (cfg.sfu) {
+      $('#featTransport').innerHTML = '<b>Servidor SFU</b><span>um envio, vários espectadores</span>';
+      loadLiveKit().catch(() => {}); // adianta o download
+    }
+  })
   .catch(() => {});
 
 /* ================= utilidades ================= */
@@ -310,6 +317,9 @@ function enterRoom(res, myName) {
   history.replaceState(null, '', `?sala=${encodeURIComponent(res.room)}`);
   document.title = `${res.room} · Na Tela`;
 
+  // Definido antes de adicionar os pares: decide se a mídia vai pelo SFU ou P2P.
+  if (res.livekit) startSfu(res.livekit);
+
   createTile(state.myId, `${myName} (você)`, true);
   if (state.mic) watchLevel(state.myId, state.mic, (lvl) => setSpeaking(state.myId, micOn() && lvl > SPEAK_THRESHOLD));
   res.peers.forEach(addPeer);
@@ -322,6 +332,9 @@ function enterRoom(res, myName) {
 function leaveRoom(reason) {
   if (!state.myId) return;
   socket.emit('leave');
+  const sfu = state.sfu;
+  state.sfu = null;
+  sfu?.room?.disconnect();
   for (const peer of state.peers.values()) closePeer(peer);
   state.peers.clear();
   state.screen?.getTracks().forEach((t) => t.stop());
@@ -530,7 +543,6 @@ function preferCodec(transceiver) {
 
 function addPeer(info) {
   if (state.peers.has(info.id)) return;
-  const pc = new RTCPeerConnection({ iceServers: state.iceServers });
   const peer = {
     id: info.id,
     name: info.name,
@@ -538,7 +550,7 @@ function addPeer(info) {
     muted: Boolean(info.muted),
     screenStreamId: info.screenStreamId || null,
     micStreamId: info.micStreamId || null,
-    pc,
+    pc: null,
     polite: state.myId > info.id,
     makingOffer: false,
     ignoreOffer: false,
@@ -546,9 +558,22 @@ function addPeer(info) {
     screenSenders: [],
     voiceAudio: new Audio(),
     voiceVolume: 1,
+    sfuMic: null,       // MediaStream da voz recebida pelo SFU
+    sfuScreen: null,    // MediaStream da tela (vídeo + áudio) recebida pelo SFU
+    sfuScreenTrack: null,
   };
   peer.voiceAudio.autoplay = true;
   state.peers.set(peer.id, peer);
+  createTile(peer.id, peer.name, false);
+  renderPeople();
+
+  if (state.sfu) sfuSyncPeer(peer);
+  else connectP2P(peer);
+}
+
+function connectP2P(peer) {
+  const pc = new RTCPeerConnection({ iceServers: state.iceServers });
+  peer.pc = pc;
 
   pc.onnegotiationneeded = async () => {
     try {
@@ -578,13 +603,10 @@ function addPeer(info) {
 
   state.mic?.getTracks().forEach((t) => pc.addTrack(t, state.mic));
   if (state.screen) addScreenTo(peer);
-
-  createTile(peer.id, peer.name, false);
-  renderPeople();
 }
 
 function closePeer(peer) {
-  peer.pc.close();
+  peer.pc?.close();
   peer.voiceAudio.srcObject = null;
   unwatchLevel(peer.id);
   state.speaking.delete(peer.id);
@@ -592,14 +614,14 @@ function closePeer(peer) {
 }
 
 function updatePeerMedia(peer) {
-  const mic = peer.micStreamId && peer.streams.get(peer.micStreamId);
+  const mic = state.sfu ? peer.sfuMic : peer.micStreamId && peer.streams.get(peer.micStreamId);
   if (mic && peer.voiceAudio.srcObject !== mic) {
     peer.voiceAudio.srcObject = mic;
     peer.voiceAudio.volume = peer.voiceVolume;
     peer.voiceAudio.play().catch(() => {});
     watchLevel(peer.id, mic, (lvl) => setSpeaking(peer.id, !peer.muted && lvl > SPEAK_THRESHOLD));
   }
-  const screen = peer.sharing && peer.screenStreamId && peer.streams.get(peer.screenStreamId);
+  const screen = peer.sharing && (state.sfu ? peer.sfuScreen : peer.screenStreamId && peer.streams.get(peer.screenStreamId));
   const hasVideo = screen && screen.getVideoTracks().some((t) => t.readyState === 'live');
   setTileVideo(peer.id, hasVideo ? screen : null, false);
 }
@@ -608,6 +630,7 @@ socket.on('signal', async ({ from, data }) => {
   const peer = state.peers.get(from);
   if (!peer) return;
   const { pc } = peer;
+  if (!pc) return;
   try {
     if (data.description) {
       const desc = { type: data.description.type, sdp: tuneVideoBitrate(preferStereo(data.description.sdp)) };
@@ -657,6 +680,151 @@ socket.on('peer-state', ({ id, ...patch }) => {
   if (!peer.sharing && wasSharing) sysMsg(`${peer.name} parou de transmitir.`);
 });
 
+/* ---------- SFU (LiveKit) ---------- */
+// Com o SFU, cada pessoa envia um único fluxo ao servidor, que repassa para os outros.
+// A tela vai em simulcast (várias resoluções); o servidor escolhe a camada que cabe
+// na conexão de cada espectador e pausa as que ninguém está usando (dynacast).
+
+let lkLoading = null;
+function loadLiveKit() {
+  if (window.LivekitClient) return Promise.resolve(window.LivekitClient);
+  lkLoading ??= new Promise((resolve, reject) => {
+    const el = document.createElement('script');
+    el.src = '/vendor/livekit-client.js';
+    el.onload = () => resolve(window.LivekitClient);
+    el.onerror = () => { lkLoading = null; reject(new Error('livekit-client não carregou')); };
+    document.head.append(el);
+  });
+  return lkLoading;
+}
+
+function startSfu({ url, token }) {
+  const sfu = { LK: null, room: null, connected: false, micPub: null, screenPubs: [], ready: null };
+  state.sfu = sfu;
+  sfu.ready = (async () => {
+    const LK = await loadLiveKit();
+    if (state.sfu !== sfu) return;
+    const room = new LK.Room({ adaptiveStream: false, dynacast: true, stopLocalTrackOnUnpublish: false });
+    const sync = (_track, _pub, participant) => {
+      const peer = state.peers.get(participant.identity);
+      if (peer) sfuSyncPeer(peer);
+    };
+    room
+      .on(LK.RoomEvent.TrackSubscribed, sync)
+      .on(LK.RoomEvent.TrackUnsubscribed, sync)
+      .on(LK.RoomEvent.Reconnecting, () => toast('Reconectando ao servidor de vídeo…'))
+      .on(LK.RoomEvent.Reconnected, () => toast('Reconectado.'))
+      .on(LK.RoomEvent.Disconnected, () => {
+        // Falha no connect inicial é tratada no catch abaixo.
+        if (state.sfu === sfu && sfu.connected) leaveRoom('Conexão com o servidor de vídeo perdida.');
+      });
+    sfu.LK = LK;
+    sfu.room = room; // antes do connect, para o leaveRoom conseguir cancelar
+    await room.connect(url, token);
+    if (state.sfu !== sfu) return;
+    sfu.connected = true;
+    for (const peer of state.peers.values()) sfuSyncPeer(peer);
+  })();
+  sfu.ready.catch((err) => {
+    if (state.sfu !== sfu) return;
+    console.error('livekit', err);
+    leaveRoom('Não foi possível conectar ao servidor de vídeo.');
+  });
+  if (state.mic) sfuPublishMic();
+}
+
+// Monta os MediaStreams de um par a partir das faixas que o SFU entregou.
+function sfuSyncPeer(peer) {
+  const sfu = state.sfu;
+  const participant = sfu?.room?.remoteParticipants.get(peer.id);
+  let mic = null;
+  let video = null;
+  const screenTracks = [];
+  for (const pub of participant?.trackPublications.values() ?? []) {
+    const t = pub.track;
+    if (!t || !pub.isSubscribed) continue;
+    if (pub.source === sfu.LK.Track.Source.Microphone) mic = t.mediaStreamTrack;
+    else if (pub.source === sfu.LK.Track.Source.ScreenShare) { video = t; screenTracks.push(t.mediaStreamTrack); }
+    else if (pub.source === sfu.LK.Track.Source.ScreenShareAudio) screenTracks.push(t.mediaStreamTrack);
+  }
+  if (peer.sfuMic?.getAudioTracks()[0] !== mic) peer.sfuMic = mic ? new MediaStream([mic]) : null;
+  // Stream novo sempre que as faixas mudam: o <video> recomeça direito.
+  const current = peer.sfuScreen?.getTracks() ?? [];
+  const changed = current.length !== screenTracks.length || screenTracks.some((t) => !current.includes(t));
+  if (changed) peer.sfuScreen = screenTracks.length ? new MediaStream(screenTracks) : null;
+  peer.sfuScreenTrack = video;
+  updatePeerMedia(peer);
+}
+
+async function sfuPublishMic() {
+  const sfu = state.sfu;
+  const track = state.mic?.getAudioTracks()[0];
+  if (!sfu || !track) return;
+  try {
+    await sfu.ready;
+    if (state.sfu !== sfu || state.mic?.getAudioTracks()[0] !== track || sfu.micPub) return;
+    sfu.micPub = await sfu.room.localParticipant.publishTrack(track, { source: sfu.LK.Track.Source.Microphone });
+  } catch (err) {
+    if (state.sfu !== sfu) return; // saiu da sala ou a conexão falhou (já avisado)
+    console.error('publicar microfone', err);
+    toast('Falha ao enviar o microfone.');
+  }
+}
+
+// Camadas abaixo da principal (a principal é a própria qualidade escolhida).
+function sfuLayers(LK, q) {
+  const low = new LK.VideoPreset(640, 360, 600_000, Math.min(q.fps, 30));
+  if (q.height < 1080) return [low];
+  return [low, new LK.VideoPreset(1280, 720, Math.round(q.bitrate * 0.4), q.fps)];
+}
+
+async function sfuPublishScreen() {
+  const sfu = state.sfu;
+  const stream = state.screen;
+  if (!sfu || !stream) return;
+  await sfu.ready;
+  if (state.sfu !== sfu || state.screen !== stream) return;
+  const { LK } = sfu;
+  const q = state.quality;
+  const lp = sfu.room.localParticipant;
+  const pubs = [];
+  sfu.screenPubs = pubs;
+  const video = stream.getVideoTracks()[0];
+  if (video) {
+    pubs.push(await lp.publishTrack(video, {
+      source: LK.Track.Source.ScreenShare,
+      videoCodec: codecSelect.value,
+      simulcast: true,
+      screenShareEncoding: { maxBitrate: q.bitrate, maxFramerate: q.fps, priority: 'high' },
+      screenShareSimulcastLayers: sfuLayers(LK, q),
+      degradationPreference: q.degradation,
+    }));
+  }
+  for (const track of stream.getAudioTracks()) {
+    pubs.push(await lp.publishTrack(track, {
+      source: LK.Track.Source.ScreenShareAudio,
+      dtx: false,
+      red: false,
+      forceStereo: true,
+      audioPreset: { maxBitrate: 192_000 },
+    }));
+  }
+  // Parou de transmitir (ou trocou a qualidade) enquanto publicava.
+  if (state.screen !== stream || sfu.screenPubs !== pubs) await unpublishAll(sfu, pubs);
+}
+
+async function sfuUnpublishScreen() {
+  const sfu = state.sfu;
+  if (!sfu?.room) return;
+  const pubs = sfu.screenPubs;
+  sfu.screenPubs = [];
+  await unpublishAll(sfu, pubs);
+}
+
+function unpublishAll(sfu, pubs) {
+  return Promise.all(pubs.map((p) => p.track && sfu.room.localParticipant.unpublishTrack(p.track, false).catch(() => {})));
+}
+
 /* ---------- microfone ---------- */
 
 const micOn = () => Boolean(state.mic?.getAudioTracks()[0]?.enabled);
@@ -671,11 +839,15 @@ async function toggleMic() {
     }
     // Avisa o id do stream antes de mandar as faixas, para os outros reconhecerem.
     socket.emit('state', { micStreamId: state.mic.id, muted: false });
-    for (const peer of state.peers.values()) state.mic.getTracks().forEach((t) => peer.pc.addTrack(t, state.mic));
+    if (state.sfu) sfuPublishMic();
+    else for (const peer of state.peers.values()) state.mic.getTracks().forEach((t) => peer.pc.addTrack(t, state.mic));
     watchLevel(state.myId, state.mic, (lvl) => setSpeaking(state.myId, micOn() && lvl > SPEAK_THRESHOLD));
   } else {
     const track = state.mic.getAudioTracks()[0];
-    track.enabled = !track.enabled;
+    const lkTrack = state.sfu?.micPub?.track;
+    // Pelo SFU, o mute avisa o servidor (para de encaminhar); na malha só zera o áudio.
+    if (lkTrack) await (track.enabled ? lkTrack.mute() : lkTrack.unmute());
+    else track.enabled = !track.enabled;
     socket.emit('state', { muted: !track.enabled });
   }
   updateMicBtn();
@@ -741,7 +913,8 @@ async function startShare() {
   state.screen = stream;
   state.quality = q;
   socket.emit('state', { sharing: true, screenStreamId: stream.id });
-  for (const peer of state.peers.values()) addScreenTo(peer);
+  if (state.sfu) sfuPublishScreen().catch((err) => { console.error('publicar tela', err); toast('Falha ao transmitir pelo servidor.'); stopShare(); });
+  else for (const peer of state.peers.values()) addScreenTo(peer);
   setTileVideo(state.myId, stream, true);
   updateShareBtn();
   renderPeople();
@@ -750,6 +923,7 @@ async function startShare() {
 
 function stopShare() {
   if (!state.screen) return;
+  if (state.sfu) sfuUnpublishScreen();
   state.screen.getTracks().forEach((t) => t.stop());
   for (const peer of state.peers.values()) {
     peer.screenSenders.forEach((sender) => { try { peer.pc.removeTrack(sender); } catch { /* conexão fechada */ } });
@@ -779,6 +953,11 @@ qualitySelect.onchange = async () => {
   const video = state.screen.getVideoTracks()[0];
   video.contentHint = q.hint;
   await video.applyConstraints({ width: { ideal: q.width }, height: { ideal: q.height }, frameRate: { ideal: q.fps, max: q.fps } }).catch(() => {});
+  if (state.sfu) {
+    // As camadas do simulcast dependem da qualidade: republica (a imagem pisca por um instante).
+    await sfuUnpublishScreen();
+    await sfuPublishScreen().catch((err) => console.error('republicar tela', err));
+  }
   for (const peer of state.peers.values()) {
     for (const sender of peer.screenSenders) {
       if (sender.track?.kind === 'video') await applySenderParams(sender, q);
@@ -807,9 +986,16 @@ for (const [key, c] of Object.entries(CODECS)) {
 }
 codecSelect.value = CODECS[store.get('codec')] ? store.get('codec') : 'h264';
 if (!codecSelect.value) codecSelect.selectedIndex = 0;
-codecSelect.onchange = () => {
+codecSelect.onchange = async () => {
   store.set('codec', codecSelect.value);
-  if (state.screen) toast('O codec novo vale a partir da próxima transmissão.');
+  if (!state.screen) return;
+  if (state.sfu) {
+    await sfuUnpublishScreen();
+    await sfuPublishScreen().catch((err) => console.error('republicar tela', err));
+    toast(`Codec: ${CODECS[codecSelect.value].label}`);
+  } else {
+    toast('O codec novo vale a partir da próxima transmissão.');
+  }
 };
 
 /* ---------- estatísticas ---------- */
@@ -826,9 +1012,10 @@ const fmtRate = (kbps) => (kbps >= 1000 ? `${(kbps / 1000).toFixed(1)} Mbps` : `
 const LIMIT = { none: 'nenhum', cpu: 'CPU', bandwidth: 'rede', other: 'outro' };
 
 async function inboundStats(peer) {
-  const track = peer.streams.get(peer.screenStreamId)?.getVideoTracks()[0];
+  const track = state.sfu ? peer.sfuScreenTrack?.mediaStreamTrack : peer.streams.get(peer.screenStreamId)?.getVideoTracks()[0];
   if (!track) return ['Aguardando vídeo…'];
-  const st = await peer.pc.getStats();
+  const st = state.sfu ? await peer.sfuScreenTrack.getRTCStatsReport() : await peer.pc.getStats();
+  if (!st) return ['Aguardando vídeo…'];
   let video;
   let pair;
   st.forEach((s) => {
@@ -850,6 +1037,7 @@ async function inboundStats(peer) {
 }
 
 async function outboundStats() {
+  if (state.sfu) return sfuOutboundStats();
   const lines = [];
   let upload = 0;
   for (const peer of state.peers.values()) {
@@ -867,6 +1055,29 @@ async function outboundStats() {
   }
   if (!lines.length) return ['Ninguém assistindo ainda.'];
   return [`Upload total: ${fmtRate(upload)} (${lines.length} ${lines.length === 1 ? 'espectador' : 'espectadores'})`, ...lines];
+}
+
+const LAYER = { f: 'alta', h: 'média', q: 'baixa' };
+
+async function sfuOutboundStats() {
+  const pub = state.sfu.screenPubs.find((p) => p.kind === 'video');
+  const st = await pub?.track?.getRTCStatsReport();
+  if (!st) return ['Preparando transmissão…'];
+  const layers = [];
+  st.forEach((s) => { if (s.type === 'outbound-rtp' && s.kind === 'video') layers.push(s); });
+  layers.sort((a, b) => (b.frameHeight || 0) - (a.frameHeight || 0));
+  let upload = 0;
+  const lines = layers.map((s) => {
+    const name = LAYER[s.rid] || s.rid || 'única';
+    const kbps = kbpsSince(`out:${s.id}`, s.bytesSent, s.timestamp);
+    if (s.active === false) return `${name}: pausada (ninguém precisa dela)`;
+    upload += kbps;
+    const codec = st.get(s.codecId)?.mimeType?.split('/')[1] || '?';
+    const hw = s.powerEfficientEncoder === true ? ' GPU' : s.powerEfficientEncoder === false ? ' CPU' : '';
+    return `${name}: ${s.frameWidth || 0}×${s.frameHeight || 0} @ ${Math.round(s.framesPerSecond || 0)} · ${fmtRate(kbps)} · ${codec}${hw} · limite: ${LIMIT[s.qualityLimitationReason] || '?'}`;
+  });
+  const n = state.peers.size;
+  return [`Upload para o servidor: ${fmtRate(upload)} (${n} ${n === 1 ? 'espectador' : 'espectadores'}, envio único)`, ...lines];
 }
 
 setInterval(async () => {
