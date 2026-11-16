@@ -15,7 +15,9 @@ Acesse http://localhost:3000. Para testar sozinho, abra duas abas na mesma sala.
 
 - **Servidor** ([server.js](server.js)): Express + Socket.IO. Ele só cuida das salas (nome, senha com hash scrypt, quem está dentro) e repassa a sinalização WebRTC. O vídeo não passa por ele.
 - **Cliente** ([public/app.js](public/app.js)): conexões WebRTC P2P em malha (cada pessoa conecta direto com as outras), usando o padrão *perfect negotiation*.
-  - Tela: `getDisplayMedia` com o preset escolhido (resolução, FPS, bitrate e `contentHint`); dá para trocar a qualidade durante a transmissão.
+  - Tela: `getDisplayMedia` com o preset escolhido (resolução, FPS, bitrate, `contentHint` e `degradationPreference`); dá para trocar a qualidade durante a transmissão.
+  - Codec: H.264 por padrão (encoder de GPU na maioria dos PCs), com opção de AV1, VP9 ou VP8. O bitrate inicial é forçado perto do alvo (`x-google-start-bitrate`), então a imagem já começa nítida.
+  - Estatísticas: o botão 📊 no vídeo mostra resolução, FPS, bitrate, codec, perda e ping; em quem transmite, mostra o upload por espectador e o que está limitando (CPU ou rede).
   - Áudio: Opus estéreo forçado no SDP, então o som do jogo chega em estéreo.
   - Voz: microfone com supressão de ruído/eco do navegador, indicador de quem está falando, volume por pessoa, atalho **M** para mutar.
 - A senha é definida por quem cria a sala. A sala some quando fica vazia.

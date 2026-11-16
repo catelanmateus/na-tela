@@ -176,14 +176,20 @@ input::placeholder { color: #5d5876; }
 .tile-name { background: rgba(0, 0, 0, .6); padding: 4px 9px; border-radius: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .tile-name.muted::after { content: " 🔇"; }
 .live-badge { display: none; background: var(--live); color: #fff; font-size: 10px; font-weight: 800; letter-spacing: .06em; padding: 4px 7px; border-radius: 6px; }
-.tile.has-video .live-badge { display: inline-block; }
-.vol, .fs { pointer-events: auto; display: none; }
-.tile.has-video:hover .fs { display: inline-block; }
+.tile.has-video .live-badge { display: inline-block; margin-right: auto; }
+.vol, .fs, .st { pointer-events: auto; display: none; }
+.tile.has-video:hover .fs, .tile.has-video:hover .st { display: inline-block; }
+.st { background: rgba(0, 0, 0, .6); border: 0; border-radius: 8px; padding: 3px 8px; font-size: 14px; }
+.stats {
+  position: absolute; top: 8px; left: 8px; margin: 0; max-width: calc(100% - 16px);
+  background: rgba(0, 0, 0, .72); border-radius: 8px; padding: 8px 10px;
+  font: 12px/1.5 ui-monospace, Consolas, monospace; white-space: pre-wrap; pointer-events: none;
+}
+.tile:not(.has-video) .stats { display: none; }
 .tile.has-video:not(.self):hover .vol { display: inline-flex; }
-.vol { margin-left: auto; align-items: center; gap: 6px; background: rgba(0, 0, 0, .6); padding: 3px 8px; border-radius: 8px; }
+.vol { align-items: center; gap: 6px; background: rgba(0, 0, 0, .6); padding: 3px 8px; border-radius: 8px; }
 .vol input { width: 90px; padding: 0; accent-color: var(--accent); }
-.fs { margin-left: auto; background: rgba(0, 0, 0, .6); border: 0; border-radius: 8px; padding: 3px 9px; font-size: 16px; }
-.vol + .fs { margin-left: 0; }
+.fs { background: rgba(0, 0, 0, .6); border: 0; border-radius: 8px; padding: 3px 9px; font-size: 16px; }
 .tile:fullscreen { border: 0; border-radius: 0; }
 
 .sidebar { width: 310px; flex: none; border-left: 1px solid var(--line); display: flex; flex-direction: column; background: var(--bg-2); min-height: 0; }
