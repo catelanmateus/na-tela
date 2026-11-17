@@ -277,22 +277,11 @@ $('#joinForm').onsubmit = async (e) => {
   const btn = $('#joinBtn');
   btn.disabled = true;
 
-  try {
-    state.mic = await navigator.mediaDevices.getUserMedia(micConstraints());
-  } catch {
-    state.mic = null;
-    toast('Entrando sem microfone.');
-  }
-
-  socket.timeout(8000).emit('join', {
-    room, name, password,
-    micStreamId: state.mic?.id || null,
-    muted: false,
-  }, (err, res) => {
+  // Entra no mudo, sem nem abrir o microfone (o pessoal costuma usar o Discord).
+  // O botão Microfone pede o acesso na primeira vez que for ligado.
+  socket.timeout(8000).emit('join', { room, name, password, micStreamId: null, muted: true }, (err, res) => {
     btn.disabled = false;
     if (err || !res?.ok) {
-      state.mic?.getTracks().forEach((t) => t.stop());
-      state.mic = null;
       showJoinError(err ? 'Servidor não respondeu. Tente de novo.' : res.error);
       return;
     }
