@@ -128,7 +128,7 @@ async function openMic() {
   const dest = ctx.createMediaStreamDestination();
   dest.channelCount = 1;
   dest.channelCountMode = 'explicit';
-  const mic = { raw, ctx, source, dest, denoiser: null, stream: dest.stream };
+  const mic = { raw, ctx, source, dest, denoiser: null, gate: null, stream: dest.stream };
   try {
     const { lib, wasmBinary } = await loadNoiseSuppressor();
     await ctx.audioWorklet.addModule('/vendor/noise/rnnoiseWorklet.js');
@@ -138,20 +138,39 @@ async function openMic() {
   } catch (err) {
     console.warn('supressão por IA indisponível; usando a do navegador', err);
   }
+  try {
+    await ctx.audioWorklet.addModule('/gate-worklet.js');
+    mic.gate = new AudioWorkletNode(ctx, 'nosso-servidor-noise-gate', {
+      outputChannelCount: [1],
+      channelCount: 1,
+      channelCountMode: 'explicit',
+    });
+    mic.gate.port.onmessage = (e) => showMicLevel(e.data);
+  } catch (err) {
+    console.warn('portão de ruído indisponível', err);
+  }
   routeMic(mic);
   return mic;
 }
 
+// microfone → (RNNoise, se a supressão estiver ligada) → portão de ruído → envio.
+// Com a supressão desligada o portão fica sempre aberto: só mede o nível.
 function routeMic(mic) {
   if (!mic) return;
   mic.source.disconnect();
   mic.denoiser?.disconnect();
+  mic.gate?.disconnect();
+  let node = mic.source;
   if (mic.denoiser && noiseOn()) {
-    mic.source.connect(mic.denoiser);
-    mic.denoiser.connect(mic.dest);
-  } else {
-    mic.source.connect(mic.dest);
+    node.connect(mic.denoiser);
+    node = mic.denoiser;
   }
+  if (mic.gate) {
+    node.connect(mic.gate);
+    node = mic.gate;
+  }
+  node.connect(mic.dest);
+  applyGate(mic);
   // Sem o RNNoise (navegador sem AudioWorklet/WebAssembly), cai na supressão do navegador.
   if (!mic.denoiser) mic.raw.getAudioTracks()[0]?.applyConstraints({ ...micConstraints().audio, noiseSuppression: noiseOn() }).catch(() => {});
 }
@@ -161,6 +180,7 @@ function closeMic(mic) {
   mic.raw.getTracks().forEach((t) => t.stop());
   mic.stream.getTracks().forEach((t) => t.stop());
   mic.denoiser?.destroy();
+  mic.gate?.port.close();
   mic.ctx.close().catch(() => {});
 }
 
@@ -176,7 +196,58 @@ function updateNoiseBtn() {
   const on = noiseOn();
   $('#nsBtn').setAttribute('aria-pressed', String(on));
   $('#nsBtn span').textContent = on ? 'Ruído: filtrado' : 'Ruído: sem filtro';
+  // A sensibilidade só vale com a supressão ligada.
+  document.querySelectorAll('.sens').forEach((el) => el.classList.toggle('disabled', !on));
+  document.querySelectorAll('.sens-range').forEach((r) => { r.disabled = !on; });
 }
+
+/* ---------- sensibilidade do microfone (portão de ruído) ---------- */
+// Em dBFS: abaixo disso o microfone fica mudo. -40 deixa a voz perto do microfone passar
+// e corta a maior parte do teclado, do mouse e da voz de longe; cada um ajusta no medidor.
+const GATE_MIN_DB = -80;
+const GATE_MAX_DB = -10;
+const gateDb = () => store.get('gate', -40);
+
+function applyGate(mic) {
+  const param = mic?.gate?.parameters.get('threshold');
+  if (param) param.value = noiseOn() ? gateDb() : -120;
+}
+
+const dbToPct = (db) => Math.max(0, Math.min(100, ((db - GATE_MIN_DB) / (GATE_MAX_DB - GATE_MIN_DB)) * 100));
+
+function showMicLevel({ db, open }) {
+  document.querySelectorAll('.sens').forEach((el) => {
+    el.querySelector('.sens-level').style.width = `${dbToPct(db)}%`;
+    el.classList.toggle('open', open && noiseOn());
+  });
+}
+
+document.querySelectorAll('.sens-range').forEach((range) => {
+  range.min = GATE_MIN_DB;
+  range.max = GATE_MAX_DB;
+  range.value = gateDb();
+  range.oninput = () => {
+    store.set('gate', Number(range.value));
+    document.querySelectorAll('.sens-range').forEach((r) => { if (r !== range) r.value = range.value; });
+    applyGate(testMic);
+    applyGate(state.micChain);
+  };
+});
+updateNoiseBtn();
+
+// Painel de sensibilidade na sala: abre pelo botão ao lado de "Ruído" e fecha ao clicar fora.
+$('#micCfgBtn').onclick = (e) => {
+  e.stopPropagation();
+  const panel = $('#micPanel');
+  panel.hidden = !panel.hidden;
+  $('#micCfgBtn').setAttribute('aria-expanded', String(!panel.hidden));
+};
+$('#micPanel').onclick = (e) => e.stopPropagation();
+document.addEventListener('click', () => {
+  if ($('#micPanel').hidden) return;
+  $('#micPanel').hidden = true;
+  $('#micCfgBtn').setAttribute('aria-expanded', 'false');
+});
 
 /* ================= medidor de áudio ================= */
 
@@ -255,7 +326,6 @@ async function startMicTest() {
     return;
   }
   await listMics();
-  watchLevel('test', testMic.stream, (lvl) => { $('#micMeter').style.width = `${Math.min(100, lvl * 400)}%`; });
   loopAudio.srcObject = $('#loopToggle').checked ? testMic.stream : null;
   loopAudio.play().catch(() => {});
   $('#micTestBtn').textContent = 'Parar teste';
@@ -263,11 +333,10 @@ async function startMicTest() {
 
 function stopMicTest() {
   if (!testMic) return;
-  unwatchLevel('test');
   closeMic(testMic);
   testMic = null;
   loopAudio.srcObject = null;
-  $('#micMeter').style.width = '0';
+  showMicLevel({ db: -120, open: false });
   $('#micTestBtn').textContent = 'Testar microfone';
 }
 

@@ -45,7 +45,11 @@
         <summary>Microfone <span>você entra no mudo</span></summary>
         <div class="mic-body">
           <select id="micSelect" aria-label="Microfone"><option value="">Padrão do sistema</option></select>
-          <div class="meter"><div id="micMeter"></div></div>
+          <div class="sens-label"><span>Sensibilidade</span><em>arraste a marca: a voz passa, o teclado não</em></div>
+          <div class="sens" title="Sensibilidade do microfone">
+            <div class="sens-meter"><div class="sens-level"></div></div>
+            <input type="range" class="sens-range" step="1" aria-label="Sensibilidade do microfone">
+          </div>
           <div class="mic-row">
             <button type="button" id="micTestBtn" class="ghost small">Testar microfone</button>
             <label class="check" title="Use fone de ouvido para não dar microfonia">
@@ -113,6 +117,19 @@
         <svg viewBox="0 0 24 24"><path d="M3 12h2M7 8v8M11 5v14M15 9v6M19 11v2"/><path class="slash" d="M4 4l16 16"/></svg>
         <span>Ruído: filtrado</span>
       </button>
+      <div class="mic-cfg">
+        <button id="micCfgBtn" class="ctl" title="Sensibilidade do microfone" aria-expanded="false" aria-controls="micPanel">
+          <svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>
+        </button>
+        <div id="micPanel" class="mic-panel" hidden>
+          <strong>Sensibilidade do microfone</strong>
+          <div class="sens">
+            <div class="sens-meter"><div class="sens-level"></div></div>
+            <input type="range" class="sens-range" step="1" aria-label="Sensibilidade do microfone">
+          </div>
+          <p>Fale normalmente: a barra deve passar da marca e ficar verde. Teclado, mouse e voz de longe devem ficar antes dela. Vale com "Ruído: filtrado".</p>
+        </div>
+      </div>
       <div class="share-group">
         <select id="qualitySelect" title="Qualidade da transmissão"></select>
         <select id="codecSelect" title="Codec de vídeo (H.264 usa a placa de vídeo na maioria dos PCs)"></select>        <button id="shareBtn" class="ctl accent">

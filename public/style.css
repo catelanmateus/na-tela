@@ -136,8 +136,6 @@ input::placeholder { color: #56625b; }
 .mic-body { display: grid; gap: 11px; padding-bottom: 14px; }
 .mic-body select { padding: 8px 10px; font-size: 13px; }
 .mic-row { display: flex; align-items: center; gap: 10px; justify-content: space-between; flex-wrap: wrap; }
-.meter { height: 5px; border-radius: 99px; background: var(--card-2); overflow: hidden; }
-.meter div { height: 100%; width: 0; background: linear-gradient(90deg, var(--ok), var(--accent), var(--live)); transition: width .06s linear; }
 .check { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); cursor: pointer; }
 .check input { width: 16px; height: 16px; accent-color: var(--accent); }
 
@@ -309,3 +307,37 @@ input::placeholder { color: #56625b; }
   .stage { grid-template-columns: 1fr; padding: 10px; }
   .stage.has-focus { grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); grid-auto-rows: 90px; }
 }
+
+/* ---------- sensibilidade do microfone ---------- */
+/* Barra com o nível do microfone e, por cima, a marca arrastável: o que passa dela é enviado. */
+.sens-label { display: flex; align-items: baseline; gap: 8px; font-size: 13px; font-weight: 600; }
+.sens-label em { font-style: normal; font-weight: 400; color: var(--muted); font-size: 12px; }
+.sens { position: relative; height: 24px; }
+.sens-meter { position: absolute; left: 0; right: 0; top: 9px; height: 6px; border-radius: 99px; background: var(--card-2); overflow: hidden; }
+.sens-level { height: 100%; width: 0; background: var(--muted); transition: width .05s linear; }
+.sens.open .sens-level { background: var(--accent); }
+.sens.disabled { opacity: .45; }
+.sens-range {
+  position: absolute; inset: 0; width: 100%; height: 24px; margin: 0; padding: 0;
+  background: transparent; border: 0; box-shadow: none; -webkit-appearance: none; appearance: none; cursor: ew-resize;
+}
+.sens-range:focus { box-shadow: none; }
+.sens-range::-webkit-slider-runnable-track { height: 24px; background: transparent; }
+.sens-range::-webkit-slider-thumb { -webkit-appearance: none; width: 4px; height: 24px; border-radius: 2px; background: var(--text); box-shadow: 0 0 0 2px var(--bg); }
+.sens-range::-moz-range-track { height: 24px; background: transparent; }
+.sens-range::-moz-range-thumb { width: 4px; height: 24px; border: 0; border-radius: 2px; background: var(--text); }
+.sens-range:focus-visible::-webkit-slider-thumb { background: var(--accent); }
+.sens-range:disabled { cursor: not-allowed; }
+
+.mic-cfg { position: relative; }
+.mic-cfg .ctl { padding: 10px; }
+.mic-cfg .ctl[aria-expanded="true"] { background: var(--card-2); color: var(--accent); }
+.mic-panel {
+  position: absolute; bottom: calc(100% + 14px); left: 50%; transform: translateX(-50%);
+  width: 300px; max-width: calc(100vw - 32px); z-index: 30;
+  display: grid; gap: 10px; padding: 14px 16px;
+  background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, .5); text-align: left;
+}
+.mic-panel strong { font-family: var(--display); font-size: 14px; font-weight: 600; }
+.mic-panel p { margin: 0; font-size: 12px; line-height: 1.45; color: var(--muted); }
