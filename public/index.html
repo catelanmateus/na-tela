@@ -40,12 +40,19 @@
         <span>Senha <em>opcional</em></span>
         <input id="passInput" type="password" placeholder="Em branco = sala aberta" autocomplete="new-password">
       </label>
+      <label class="field" id="codeField" hidden>
+        <span>Código de acesso <em>peça para quem te convidou</em></span>
+        <input id="codeInput" type="password" maxlength="100" autocomplete="off">
+      </label>
 
       <details class="mic-box">
         <summary>Microfone <span>você entra no mudo</span></summary>
         <div class="mic-body">
           <select id="micSelect" aria-label="Microfone"><option value="">Padrão do sistema</option></select>
-          <div class="sens-label"><span>Sensibilidade</span><em>arraste a marca: a voz passa, o teclado não</em></div>
+          <div class="sens-label">
+            <span>Sensibilidade</span>
+            <label class="check"><input type="checkbox" class="sens-auto-toggle" checked> Automática</label>
+          </div>
           <div class="sens" title="Sensibilidade do microfone">
             <div class="sens-meter"><div class="sens-level"></div></div>
             <input type="range" class="sens-range" step="1" aria-label="Sensibilidade do microfone">
@@ -122,12 +129,15 @@
           <svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>
         </button>
         <div id="micPanel" class="mic-panel" hidden>
-          <strong>Sensibilidade do microfone</strong>
+          <div class="sens-label">
+            <strong>Sensibilidade do microfone</strong>
+            <label class="check"><input type="checkbox" class="sens-auto-toggle" checked> Automática</label>
+          </div>
           <div class="sens">
             <div class="sens-meter"><div class="sens-level"></div></div>
             <input type="range" class="sens-range" step="1" aria-label="Sensibilidade do microfone">
           </div>
-          <p>Fale normalmente: a barra deve passar da marca e ficar verde. Teclado, mouse e voz de longe devem ficar antes dela. Vale com "Ruído: filtrado".</p>
+          <p>No automático, a marca se ajusta sozinha ao seu ruído e à sua voz. Para escolher na mão, arraste a marca: a voz deve passar dela (fica verde) e o teclado, o mouse e a voz de longe devem ficar antes. Vale com "Ruído: filtrado".</p>
         </div>
       </div>
       <div class="share-group">

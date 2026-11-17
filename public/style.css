@@ -310,7 +310,10 @@ input::placeholder { color: #56625b; }
 
 /* ---------- sensibilidade do microfone ---------- */
 /* Barra com o nível do microfone e, por cima, a marca arrastável: o que passa dela é enviado. */
-.sens-label { display: flex; align-items: baseline; gap: 8px; font-size: 13px; font-weight: 600; }
+.sens-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; font-weight: 600; }
+.sens-label .check { font-weight: 400; }
+.sens.auto .sens-range::-webkit-slider-thumb { background: var(--accent); }
+.sens.auto .sens-range::-moz-range-thumb { background: var(--accent); }
 .sens-label em { font-style: normal; font-weight: 400; color: var(--muted); font-size: 12px; }
 .sens { position: relative; height: 24px; }
 .sens-meter { position: absolute; left: 0; right: 0; top: 9px; height: 6px; border-radius: 99px; background: var(--card-2); overflow: hidden; }

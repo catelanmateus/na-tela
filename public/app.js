@@ -44,6 +44,8 @@ const state = {
   meters: new Map(),  // key -> { src, analyser, buf, cb }
   speaking: new Map(),
   sfu: null,          // { room, micPub, screenPubs } quando a mídia passa pelo LiveKit
+  sfuCfg: null,       // { url, token } se a sala usa o LiveKit (conecta só com mais alguém na sala)
+  sfuAloneTimer: null,
   micChain: null,     // microfone com o filtro de ruído no caminho (state.mic = o que é enviado)
 };
 
@@ -53,6 +55,12 @@ fetch('/api/config')
   .then((r) => r.json())
   .then((cfg) => {
     if (cfg.iceServers) state.iceServers = cfg.iceServers;
+    // Servidor fechado por código de acesso: o campo aparece já preenchido se guardado.
+    if (cfg.accessCode) {
+      $('#codeField').hidden = false;
+      $('#codeInput').value = store.get('accessCode', '');
+      $('#codeInput').required = true;
+    }
     if (cfg.sfu) {
       $('#featTransport').innerHTML = '<b>Servidor SFU</b><span>um envio, vários espectadores</span>';
       loadLiveKit().catch(() => {}); // adianta o download
@@ -122,13 +130,24 @@ function loadNoiseSuppressor() {
 // Abre o microfone já com o filtro no caminho. Retorna { stream, ... } (stream = o que é enviado).
 async function openMic() {
   const raw = await navigator.mediaDevices.getUserMedia(micConstraints());
-  const ctx = new AudioContext({ sampleRate: 48000 });
+  // 'balanced' dá um pouco mais de folga ao processamento de áudio que o padrão
+  // ('interactive'): com o PC ocupado (jogo + transmissão) o áudio não engasga.
+  const ctx = new AudioContext({ sampleRate: 48000, latencyHint: 'balanced' });
   ctx.resume().catch(() => {});
+  const mono = (node) => {
+    node.channelCount = 1;
+    node.channelCountMode = 'explicit';
+    return node;
+  };
   const source = ctx.createMediaStreamSource(raw);
-  const dest = ctx.createMediaStreamDestination();
-  dest.channelCount = 1;
-  dest.channelCountMode = 'explicit';
-  const mic = { raw, ctx, source, dest, denoiser: null, gate: null, stream: dest.stream };
+  // Corta-graves em 80 Hz: tranco na mesa, zumbido e "pop" do microfone, sem mexer na voz.
+  const highpass = mono(new BiquadFilterNode(ctx, { type: 'highpass', frequency: 80, Q: 0.7 }));
+  // Compressor suave no fim: segura os picos e deixa o volume da voz mais estável.
+  const compressor = mono(new DynamicsCompressorNode(ctx, { threshold: -24, knee: 12, ratio: 3, attack: 0.003, release: 0.25 }));
+  const dest = mono(ctx.createMediaStreamDestination());
+  source.connect(highpass);
+  compressor.connect(dest);
+  const mic = { raw, ctx, source: highpass, dest: compressor, denoiser: null, gate: null, stream: dest.stream };
   try {
     const { lib, wasmBinary } = await loadNoiseSuppressor();
     await ctx.audioWorklet.addModule('/vendor/noise/rnnoiseWorklet.js');
@@ -153,8 +172,8 @@ async function openMic() {
   return mic;
 }
 
-// microfone → (RNNoise, se a supressão estiver ligada) → portão de ruído → envio.
-// Com a supressão desligada o portão fica sempre aberto: só mede o nível.
+// microfone → corta-graves → (RNNoise, se a supressão estiver ligada) → portão de ruído
+// → compressor → envio. Com a supressão desligada o portão fica sempre aberto: só mede o nível.
 function routeMic(mic) {
   if (!mic) return;
   mic.source.disconnect();
@@ -207,32 +226,53 @@ function updateNoiseBtn() {
 const GATE_MIN_DB = -80;
 const GATE_MAX_DB = -10;
 const gateDb = () => store.get('gate', -40);
+// Automática: o portão acompanha o ruído de fundo e o volume da voz e escolhe o limite.
+const gateAuto = () => store.get('gateAuto', true);
 
 function applyGate(mic) {
-  const param = mic?.gate?.parameters.get('threshold');
-  if (param) param.value = noiseOn() ? gateDb() : -120;
+  const gate = mic?.gate;
+  if (!gate) return;
+  gate.parameters.get('auto').value = noiseOn() && gateAuto() ? 1 : 0;
+  gate.parameters.get('threshold').value = noiseOn() ? gateDb() : -120;
 }
 
 const dbToPct = (db) => Math.max(0, Math.min(100, ((db - GATE_MIN_DB) / (GATE_MAX_DB - GATE_MIN_DB)) * 100));
 
-function showMicLevel({ db, open }) {
+function showMicLevel({ db, open, thresholdDb, auto }) {
   document.querySelectorAll('.sens').forEach((el) => {
     el.querySelector('.sens-level').style.width = `${dbToPct(db)}%`;
     el.classList.toggle('open', open && noiseOn());
   });
+  // No automático, a marca anda sozinha para mostrar o limite que está em uso.
+  if (auto) document.querySelectorAll('.sens-range').forEach((r) => { r.value = Math.round(thresholdDb); });
+}
+
+// apply = false só na carga da página (ainda não há microfone aberto).
+function setGateAuto(on, apply = true) {
+  store.set('gateAuto', on);
+  document.querySelectorAll('.sens-auto-toggle').forEach((c) => { c.checked = on; });
+  document.querySelectorAll('.sens').forEach((el) => el.classList.toggle('auto', on));
+  if (!on) document.querySelectorAll('.sens-range').forEach((r) => { r.value = gateDb(); });
+  if (!apply) return;
+  applyGate(testMic);
+  applyGate(state.micChain);
 }
 
 document.querySelectorAll('.sens-range').forEach((range) => {
   range.min = GATE_MIN_DB;
   range.max = GATE_MAX_DB;
   range.value = gateDb();
+  // Arrastar a marca é escolher na mão: desliga o automático.
   range.oninput = () => {
     store.set('gate', Number(range.value));
     document.querySelectorAll('.sens-range').forEach((r) => { if (r !== range) r.value = range.value; });
+    if (gateAuto()) setGateAuto(false);
     applyGate(testMic);
     applyGate(state.micChain);
   };
 });
+document.querySelectorAll('.sens-auto-toggle').forEach((c) => { c.onchange = () => setGateAuto(c.checked); });
+setGateAuto(gateAuto(), false);
 updateNoiseBtn();
 
 // Painel de sensibilidade na sala: abre pelo botão ao lado de "Ruído" e fecha ao clicar fora.
@@ -382,7 +422,8 @@ async function refreshFavs() {
   if (list.length) {
     try {
       const qs = list.map((n) => `n=${encodeURIComponent(n)}`).join('&');
-      status = await (await fetch(`/api/rooms?${qs}`)).json();
+      const res = await fetch(`/api/rooms?${qs}`, { headers: { 'x-access-code': store.get('accessCode', '') } });
+      if (res.ok) status = await res.json();
     } catch { /* offline */ }
   }
   const ul = $('#favList');
@@ -436,12 +477,18 @@ $('#joinForm').onsubmit = async (e) => {
 
   // Entra no mudo, sem nem abrir o microfone (o pessoal costuma usar o Discord).
   // O botão Microfone pede o acesso na primeira vez que for ligado.
-  socket.timeout(8000).emit('join', { room, name, password, micStreamId: null, muted: true }, (err, res) => {
+  const accessCode = $('#codeInput').value;
+  socket.timeout(8000).emit('join', { room, name, password, accessCode, micStreamId: null, muted: true }, (err, res) => {
     btn.disabled = false;
     if (err || !res?.ok) {
       showJoinError(err ? 'Servidor não respondeu. Tente de novo.' : res.error);
+      if (res?.needCode) {
+        $('#codeField').hidden = false;
+        $('#codeInput').focus();
+      }
       return;
     }
+    if (accessCode) store.set('accessCode', accessCode);
     enterRoom(res, name);
   });
 };
@@ -464,7 +511,10 @@ function enterRoom(res, myName) {
   document.title = `${res.room} · Nosso Servidor`;
 
   // Definido antes de adicionar os pares: decide se a mídia vai pelo SFU ou P2P.
-  if (res.livekit) startSfu(res.livekit);
+  // Sozinho na sala não conecta ao LiveKit (cada minuto lá conta no plano):
+  // conecta quando chega a segunda pessoa (ver addPeer).
+  state.sfuCfg = res.livekit || null;
+  if (state.sfuCfg && res.peers.length) startSfu(state.sfuCfg);
 
   createTile(state.myId, `${myName} (você)`, true);
   if (state.mic) watchLevel(state.myId, state.mic, (lvl) => setSpeaking(state.myId, micOn() && lvl > SPEAK_THRESHOLD));
@@ -481,6 +531,8 @@ function leaveRoom(reason) {
   socket.emit('leave');
   const sfu = state.sfu;
   state.sfu = null;
+  state.sfuCfg = null;
+  clearTimeout(state.sfuAloneTimer);
   sfu?.room?.disconnect();
   for (const peer of state.peers.values()) closePeer(peer);
   state.peers.clear();
@@ -734,8 +786,26 @@ function addPeer(info, initiator = false) {
   createTile(peer.id, peer.name, false);
   renderPeople();
 
-  if (state.sfu) sfuSyncPeer(peer);
-  else connectP2P(peer, initiator);
+  if (state.sfuCfg) {
+    clearTimeout(state.sfuAloneTimer);
+    if (!state.sfu) startSfu(state.sfuCfg);
+    sfuSyncPeer(peer);
+  } else {
+    connectP2P(peer, initiator);
+  }
+}
+
+// Ficou sozinho numa sala do LiveKit: sai de lá depois de um minuto (se ninguém voltar).
+const SFU_ALONE_MS = 60_000;
+function sfuMaybeAlone() {
+  if (!state.sfu || state.peers.size) return;
+  clearTimeout(state.sfuAloneTimer);
+  state.sfuAloneTimer = setTimeout(() => {
+    if (!state.sfu || state.peers.size) return;
+    const sfu = state.sfu;
+    state.sfu = null; // antes do disconnect: não é queda de conexão, não sai da sala
+    sfu.room?.disconnect(false); // false: não para o microfone nem a tela (seguem em uso)
+  }, SFU_ALONE_MS);
 }
 
 function connectP2P(peer, initiator) {
@@ -871,7 +941,14 @@ socket.on('peer-left', ({ id }) => {
   state.peers.delete(id);
   renderPeople();
   sysMsg(`${peer.name} saiu.`);
+  sfuMaybeAlone();
 });
+
+socket.on('notice', (text) => toast(text));
+socket.on('connect_error', (err) => {
+  if (!$('#lobby').hidden) showJoinError(err.message || 'Sem conexão com o servidor.');
+});
+socket.on('connect', () => { if ($('#joinError').textContent.startsWith('Muitas') || $('#joinError').textContent.startsWith('Servidor cheio')) showJoinError(''); });
 
 socket.on('peer-state', ({ id, ...patch }) => {
   const peer = state.peers.get(id);
@@ -951,6 +1028,8 @@ function startSfu({ url, token }) {
     leaveRoom('Não foi possível conectar ao servidor de vídeo.');
   });
   if (state.mic) sfuPublishMic();
+  // Começou a transmitir sozinho e agora chegou alguém: publica a tela também.
+  if (state.screen) sfuPublishScreen().catch((err) => console.error('publicar tela', err));
 }
 
 // Monta os MediaStreams de um par a partir das faixas que o SFU entregou.
