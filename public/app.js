@@ -322,7 +322,7 @@ function enterRoom(res, myName) {
 
   createTile(state.myId, `${myName} (você)`, true);
   if (state.mic) watchLevel(state.myId, state.mic, (lvl) => setSpeaking(state.myId, micOn() && lvl > SPEAK_THRESHOLD));
-  res.peers.forEach(addPeer);
+  res.peers.forEach((p) => addPeer(p, true));
   updateMicBtn();
   updateShareBtn();
   renderPeople();
@@ -541,7 +541,8 @@ function preferCodec(transceiver) {
   }
 }
 
-function addPeer(info) {
+// initiator: true para quem acabou de entrar (conecta com quem já estava na sala).
+function addPeer(info, initiator = false) {
   if (state.peers.has(info.id)) return;
   const peer = {
     id: info.id,
@@ -554,6 +555,9 @@ function addPeer(info) {
     polite: state.myId > info.id,
     makingOffer: false,
     ignoreOffer: false,
+    signalChain: Promise.resolve(),
+    pendingCandidates: [],
+    awaitingFirstOffer: false,
     streams: new Map(),
     screenSenders: [],
     voiceAudio: new Audio(),
@@ -568,10 +572,10 @@ function addPeer(info) {
   renderPeople();
 
   if (state.sfu) sfuSyncPeer(peer);
-  else connectP2P(peer);
+  else connectP2P(peer, initiator);
 }
 
-function connectP2P(peer) {
+function connectP2P(peer, initiator) {
   const pc = new RTCPeerConnection({ iceServers: state.iceServers });
   peer.pc = pc;
 
@@ -601,9 +605,24 @@ function connectP2P(peer) {
     updatePeerMedia(peer);
   };
 
-  state.mic?.getTracks().forEach((t) => pc.addTrack(t, state.mic));
+  // Só um lado abre a negociação: quem acabou de entrar. Se os dois mandassem oferta
+  // juntos, o lado "polite" faria rollback, e o Chrome às vezes deixa a coleta de ICE
+  // parada depois disso (conexão presa em "new" e o espectador sem vídeo).
+  if (initiator) {
+    pc.createDataChannel('na-tela'); // garante a oferta mesmo sem microfone nem tela
+    addLocalMedia(peer);
+  } else {
+    peer.awaitingFirstOffer = true; // manda as faixas depois de responder a primeira oferta
+  }
+}
+
+function addLocalMedia(peer) {
+  state.mic?.getTracks().forEach((t) => peer.pc.addTrack(t, state.mic));
   if (state.screen) addScreenTo(peer);
 }
+
+// Pares que já podem receber faixas novas (os outros recebem tudo no addLocalMedia).
+const readyP2PPeers = () => [...state.peers.values()].filter((p) => p.pc && !p.awaitingFirstOffer);
 
 function closePeer(peer) {
   peer.pc?.close();
@@ -626,33 +645,55 @@ function updatePeerMedia(peer) {
   setTileVideo(peer.id, hasVideo ? screen : null, false);
 }
 
-socket.on('signal', async ({ from, data }) => {
+socket.on('signal', ({ from, data }) => {
   const peer = state.peers.get(from);
-  if (!peer) return;
+  if (!peer?.pc) return;
+  // Uma mensagem por vez, na ordem de chegada: sem isso um candidato podia ser
+  // aplicado no meio de um setRemoteDescription ainda em andamento.
+  peer.signalChain = peer.signalChain
+    .then(() => handleSignal(peer, data))
+    .catch((err) => console.error('sinalização', err));
+});
+
+async function handleSignal(peer, data) {
   const { pc } = peer;
-  if (!pc) return;
-  try {
-    if (data.description) {
-      const desc = { type: data.description.type, sdp: tuneVideoBitrate(preferStereo(data.description.sdp)) };
-      const collision = desc.type === 'offer' && (peer.makingOffer || pc.signalingState !== 'stable');
-      peer.ignoreOffer = !peer.polite && collision;
-      if (peer.ignoreOffer) return;
-      await pc.setRemoteDescription(desc);
-      if (desc.type === 'offer') {
-        await pc.setLocalDescription();
-        socket.emit('signal', { to: from, data: { description: pc.localDescription } });
-      }
-    } else if (data.candidate) {
-      try {
-        await pc.addIceCandidate(data.candidate);
-      } catch (err) {
-        if (!peer.ignoreOffer) throw err;
+  if (pc.signalingState === 'closed') return;
+  if (data.description) {
+    const desc = { type: data.description.type, sdp: tuneVideoBitrate(preferStereo(data.description.sdp)) };
+    const collision = desc.type === 'offer' && (peer.makingOffer || pc.signalingState !== 'stable');
+    peer.ignoreOffer = !peer.polite && collision;
+    if (peer.ignoreOffer) return;
+    await pc.setRemoteDescription(desc);
+    await flushCandidates(peer);
+    if (desc.type === 'offer') {
+      await pc.setLocalDescription();
+      socket.emit('signal', { to: peer.id, data: { description: pc.localDescription } });
+      if (peer.awaitingFirstOffer) {
+        peer.awaitingFirstOffer = false;
+        addLocalMedia(peer); // dispara uma renegociação, agora sem colisão
       }
     }
-  } catch (err) {
-    console.error('sinalização', err);
+  } else if (data.candidate) {
+    // Na colisão de ofertas ao entrar, os candidatos do outro lado chegam antes de
+    // haver descrição remota. Antes eles falhavam e se perdiam (a conexão ficava em
+    // ICE "new" e o espectador sem vídeo); agora esperam o próximo setRemoteDescription.
+    if (!pc.remoteDescription || peer.ignoreOffer) {
+      peer.pendingCandidates.push(data.candidate);
+      return;
+    }
+    try {
+      await pc.addIceCandidate(data.candidate);
+    } catch (err) {
+      if (!peer.ignoreOffer) throw err;
+    }
   }
-});
+}
+
+async function flushCandidates(peer) {
+  for (const candidate of peer.pendingCandidates.splice(0)) {
+    await peer.pc.addIceCandidate(candidate).catch(() => {});
+  }
+}
 
 socket.on('peer-joined', (info) => {
   if (!state.myId) return;
@@ -698,7 +739,23 @@ function loadLiveKit() {
   return lkLoading;
 }
 
+// O livekit-client monta o SDP por conta própria, então o "começar nítido" do P2P
+// (x-google-start-bitrate na resposta remota) é aplicado aqui por fora. No LiveKit só a
+// conexão de envio recebe respostas ("answer"); a de recebimento recebe ofertas.
+// Sem isso o Chrome começava a ~400 kbps: 720p só aos ~25 s e 1080p aos ~40 s.
+function patchSfuStartBitrate() {
+  const proto = RTCPeerConnection.prototype;
+  if (proto.naTelaPatched) return;
+  const original = proto.setRemoteDescription;
+  proto.setRemoteDescription = function setRemoteDescription(desc, ...rest) {
+    if (state.sfu && desc?.type === 'answer' && desc.sdp) desc = { type: desc.type, sdp: tuneVideoBitrate(desc.sdp) };
+    return original.call(this, desc, ...rest);
+  };
+  proto.naTelaPatched = true;
+}
+
 function startSfu({ url, token }) {
+  patchSfuStartBitrate();
   const sfu = { LK: null, room: null, connected: false, micPub: null, screenPubs: [], ready: null };
   state.sfu = sfu;
   sfu.ready = (async () => {
@@ -840,7 +897,7 @@ async function toggleMic() {
     // Avisa o id do stream antes de mandar as faixas, para os outros reconhecerem.
     socket.emit('state', { micStreamId: state.mic.id, muted: false });
     if (state.sfu) sfuPublishMic();
-    else for (const peer of state.peers.values()) state.mic.getTracks().forEach((t) => peer.pc.addTrack(t, state.mic));
+    else for (const peer of readyP2PPeers()) state.mic.getTracks().forEach((t) => peer.pc.addTrack(t, state.mic));
     watchLevel(state.myId, state.mic, (lvl) => setSpeaking(state.myId, micOn() && lvl > SPEAK_THRESHOLD));
   } else {
     const track = state.mic.getAudioTracks()[0];
@@ -914,7 +971,7 @@ async function startShare() {
   state.quality = q;
   socket.emit('state', { sharing: true, screenStreamId: stream.id });
   if (state.sfu) sfuPublishScreen().catch((err) => { console.error('publicar tela', err); toast('Falha ao transmitir pelo servidor.'); stopShare(); });
-  else for (const peer of state.peers.values()) addScreenTo(peer);
+  else for (const peer of readyP2PPeers()) addScreenTo(peer);
   setTileVideo(state.myId, stream, true);
   updateShareBtn();
   renderPeople();
@@ -1005,7 +1062,8 @@ const statsPrev = new Map();
 function kbpsSince(key, bytes, ts) {
   const prev = statsPrev.get(key);
   statsPrev.set(key, { bytes, ts });
-  return prev && ts > prev.ts ? ((bytes - prev.bytes) * 8) / (ts - prev.ts) : 0;
+  // Bytes menores que antes: o fluxo foi trocado (republicou a tela); recomeça a conta.
+  return prev && ts > prev.ts && bytes >= prev.bytes ? ((bytes - prev.bytes) * 8) / (ts - prev.ts) : 0;
 }
 
 const fmtRate = (kbps) => (kbps >= 1000 ? `${(kbps / 1000).toFixed(1)} Mbps` : `${Math.round(kbps)} kbps`);
@@ -1024,7 +1082,7 @@ async function inboundStats(peer) {
   });
   if (!video) return ['Aguardando vídeo…'];
   const codec = st.get(video.codecId)?.mimeType?.split('/')[1] || '?';
-  const kbps = kbpsSince(`in:${peer.id}`, video.bytesReceived, video.timestamp);
+  const kbps = kbpsSince(`in:${peer.id}:${video.id}`, video.bytesReceived, video.timestamp);
   const total = (video.packetsLost || 0) + (video.packetsReceived || 0);
   const loss = total ? ((video.packetsLost || 0) / total) * 100 : 0;
   const relay = pair && st.get(pair.localCandidateId)?.candidateType === 'relay';
