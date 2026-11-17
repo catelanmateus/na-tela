@@ -1209,9 +1209,6 @@ async function startShare() {
       video: { width: { ideal: q.width }, height: { ideal: q.height }, frameRate: { ideal: q.fps, max: q.fps } },
       audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, sampleRate: 48000 },
       systemAudio: 'include',
-      // Ao escolher uma janela (ex.: o LoL), pede só o som daquele programa, e não o do sistema
-      // inteiro (que traria o Discord junto). Navegadores sem suporte ignoram a dica.
-      windowAudio: 'window',
       selfBrowserSurface: 'exclude',
       surfaceSwitching: 'include',
     });
@@ -1235,7 +1232,8 @@ async function startShare() {
   updateShareBtn();
   renderPeople();
   if (!stream.getAudioTracks().length) toast('Transmitindo sem áudio. Para enviar o som, marque "Compartilhar áudio" ao escolher a tela/aba.');
-  else if (video.getSettings().displaySurface === 'monitor') toast('Enviando o áudio do sistema inteiro (inclui Discord e outros programas). Para mandar só o som do jogo, transmita a janela dele.');
+  // Fora de uma guia do navegador, o Chrome manda o áudio do sistema inteiro (não dá para separar um programa).
+  else if (video.getSettings().displaySurface !== 'browser') toast('Enviando o áudio do sistema inteiro (inclui Discord e outros programas).');
 }
 
 function stopShare() {
