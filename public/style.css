@@ -264,6 +264,9 @@ input::placeholder { color: #56625b; }
 .ctl .slash { display: none; }
 .ctl.off { background: rgba(255, 90, 78, .13); color: #ff8a80; }
 .ctl.off .slash { display: inline; }
+#nsBtn[aria-pressed="true"] { color: var(--accent); }
+#nsBtn[aria-pressed="false"] { color: var(--muted); }
+#nsBtn[aria-pressed="false"] .slash { display: inline; }
 .ctl.accent { background: var(--accent); color: var(--accent-ink); }
 .ctl.accent:hover { filter: brightness(1.08); }
 .ctl.accent.sharing { background: var(--live); color: #fff; }

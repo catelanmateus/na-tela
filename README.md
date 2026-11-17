@@ -39,7 +39,7 @@ O Na Tela continua cuidando de salas, senhas, chat e presença. O token do LiveK
   - Codec: H.264 por padrão (encoder de GPU na maioria dos PCs), com opção de AV1, VP9 ou VP8. O bitrate inicial é forçado perto do alvo (`x-google-start-bitrate`), então a imagem já começa nítida.
   - Estatísticas: o botão 📊 no vídeo mostra resolução, FPS, bitrate, codec, perda e ping; em quem transmite, mostra o upload por espectador e o que está limitando (CPU ou rede).
   - Áudio: Opus estéreo forçado no SDP, então o som do jogo chega em estéreo.
-  - Voz: microfone com supressão de ruído/eco do navegador, indicador de quem está falando, volume por pessoa, atalho **M** para mutar.
+  - Voz: entra no mudo; supressão de ruído por IA com [RNNoise](https://github.com/xiph/rnnoise) (`@sapphi-red/web-noise-suppressor`, roda no navegador em AudioWorklet + WebAssembly, servido em `/vendor/noise/`), que liga e desliga dentro da sala sem reconectar; cancelamento de eco do navegador; indicador de quem está falando, volume por pessoa, atalho **M** para mutar.
 - A senha é definida por quem cria a sala. A sala some quando fica vazia.
 
 ## Limitações

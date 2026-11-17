@@ -27,6 +27,13 @@ app.use(express.static(path.join(__dirname, 'public')));
 // Cliente do LiveKit servido daqui (versão travada pelo package-lock, sem CDN).
 const LIVEKIT_CLIENT = path.join(path.dirname(require.resolve('livekit-client')), 'livekit-client.umd.js');
 app.get('/vendor/livekit-client.js', (req, res) => res.sendFile(LIVEKIT_CLIENT, { maxAge: '1d' }));
+// Supressão de ruído por IA (RNNoise em WebAssembly), roda no navegador de quem fala.
+const NOISE_DIST = path.dirname(require.resolve('@sapphi-red/web-noise-suppressor'));
+app.get('/vendor/noise/index.js', (req, res) => res.sendFile(path.join(NOISE_DIST, 'index.js'), { maxAge: '1d' }));
+app.get('/vendor/noise/rnnoiseWorklet.js', (req, res) => res.sendFile(path.join(NOISE_DIST, 'rnnoise', 'workletProcessor.js'), { maxAge: '1d' }));
+for (const file of ['rnnoise.wasm', 'rnnoise_simd.wasm']) {
+  app.get(`/vendor/noise/${file}`, (req, res) => res.type('application/wasm').sendFile(path.join(NOISE_DIST, file), { maxAge: '7d' }));
+}
 
 // key (nome em minúsculas) -> { name, salt, passHash, peers: Map<socketId, {name, sharing, muted, screenStreamId, micStreamId}> }
 const rooms = new Map();

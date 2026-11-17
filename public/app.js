@@ -44,6 +44,7 @@ const state = {
   meters: new Map(),  // key -> { src, analyser, buf, cb }
   speaking: new Map(),
   sfu: null,          // { room, micPub, screenPubs } quando a mídia passa pelo LiveKit
+  micChain: null,     // microfone com o filtro de ruído no caminho (state.mic = o que é enviado)
 };
 
 const socket = io();
@@ -80,17 +81,101 @@ function colorFor(id) {
   return `hsl(${h} 70% 70%)`;
 }
 
+const noiseOn = () => $('#nsToggle').checked;
+
+// A supressão do navegador fica desligada: quem tira o ruído é o RNNoise (abaixo).
+// O cancelamento de eco continua, para quem usa caixa de som em vez de fone.
 function micConstraints() {
   const deviceId = $('#micSelect').value;
-  const clean = $('#nsToggle').checked;
   return {
     audio: {
       deviceId: deviceId ? { exact: deviceId } : undefined,
-      noiseSuppression: clean,
-      echoCancellation: clean,
+      channelCount: 1,
+      noiseSuppression: false,
+      echoCancellation: true,
       autoGainControl: true,
     },
   };
+}
+
+/* ================= supressão de ruído (RNNoise) ================= */
+// O filtro de ruído do navegador quase não faz diferença em muitos microfones.
+// O RNNoise é um supressor por IA, de código aberto, que roda aqui mesmo
+// (AudioWorklet + WebAssembly), sem custo e sem mandar o áudio para lugar nenhum.
+// O microfone passa por um AudioContext a 48 kHz (a taxa do RNNoise). Ligar ou
+// desligar a supressão só troca a ligação dos nós: a faixa enviada é sempre a
+// mesma, então não precisa renegociar (P2P) nem republicar (LiveKit).
+
+let noiseLib = null;
+function loadNoiseSuppressor() {
+  noiseLib ??= (async () => {
+    const lib = await import('/vendor/noise/index.js');
+    const wasmBinary = await lib.loadRnnoise({ url: '/vendor/noise/rnnoise.wasm', simdUrl: '/vendor/noise/rnnoise_simd.wasm' });
+    return { lib, wasmBinary };
+  })().catch((err) => {
+    noiseLib = null;
+    throw err;
+  });
+  return noiseLib;
+}
+
+// Abre o microfone já com o filtro no caminho. Retorna { stream, ... } (stream = o que é enviado).
+async function openMic() {
+  const raw = await navigator.mediaDevices.getUserMedia(micConstraints());
+  const ctx = new AudioContext({ sampleRate: 48000 });
+  ctx.resume().catch(() => {});
+  const source = ctx.createMediaStreamSource(raw);
+  const dest = ctx.createMediaStreamDestination();
+  dest.channelCount = 1;
+  dest.channelCountMode = 'explicit';
+  const mic = { raw, ctx, source, dest, denoiser: null, stream: dest.stream };
+  try {
+    const { lib, wasmBinary } = await loadNoiseSuppressor();
+    await ctx.audioWorklet.addModule('/vendor/noise/rnnoiseWorklet.js');
+    mic.denoiser = new lib.RnnoiseWorkletNode(ctx, { wasmBinary, maxChannels: 1 });
+    mic.denoiser.channelCount = 1;
+    mic.denoiser.channelCountMode = 'explicit';
+  } catch (err) {
+    console.warn('supressão por IA indisponível; usando a do navegador', err);
+  }
+  routeMic(mic);
+  return mic;
+}
+
+function routeMic(mic) {
+  if (!mic) return;
+  mic.source.disconnect();
+  mic.denoiser?.disconnect();
+  if (mic.denoiser && noiseOn()) {
+    mic.source.connect(mic.denoiser);
+    mic.denoiser.connect(mic.dest);
+  } else {
+    mic.source.connect(mic.dest);
+  }
+  // Sem o RNNoise (navegador sem AudioWorklet/WebAssembly), cai na supressão do navegador.
+  if (!mic.denoiser) mic.raw.getAudioTracks()[0]?.applyConstraints({ ...micConstraints().audio, noiseSuppression: noiseOn() }).catch(() => {});
+}
+
+function closeMic(mic) {
+  if (!mic) return;
+  mic.raw.getTracks().forEach((t) => t.stop());
+  mic.stream.getTracks().forEach((t) => t.stop());
+  mic.denoiser?.destroy();
+  mic.ctx.close().catch(() => {});
+}
+
+function setNoise(on) {
+  $('#nsToggle').checked = on;
+  store.set('ns', on);
+  routeMic(testMic);
+  routeMic(state.micChain);
+  updateNoiseBtn();
+}
+
+function updateNoiseBtn() {
+  const on = noiseOn();
+  $('#nsBtn').setAttribute('aria-pressed', String(on));
+  $('#nsBtn span').textContent = on ? 'Ruído: filtrado' : 'Ruído: sem filtro';
 }
 
 /* ================= medidor de áudio ================= */
@@ -157,37 +242,40 @@ async function listMics() {
 }
 listMics();
 
-let testStream = null;
+// O teste usa o mesmo caminho do microfone na sala: com "Ouvir minha voz" dá para
+// comparar com e sem a supressão.
+let testMic = null;
 const loopAudio = new Audio();
 
 async function startMicTest() {
   try {
-    testStream = await navigator.mediaDevices.getUserMedia(micConstraints());
+    testMic = await openMic();
   } catch {
     showJoinError('Não foi possível acessar o microfone. Verifique a permissão do navegador.');
     return;
   }
   await listMics();
-  watchLevel('test', testStream, (lvl) => { $('#micMeter').style.width = `${Math.min(100, lvl * 400)}%`; });
-  loopAudio.srcObject = $('#loopToggle').checked ? testStream : null;
+  watchLevel('test', testMic.stream, (lvl) => { $('#micMeter').style.width = `${Math.min(100, lvl * 400)}%`; });
+  loopAudio.srcObject = $('#loopToggle').checked ? testMic.stream : null;
   loopAudio.play().catch(() => {});
   $('#micTestBtn').textContent = 'Parar teste';
 }
 
 function stopMicTest() {
-  if (!testStream) return;
+  if (!testMic) return;
   unwatchLevel('test');
-  testStream.getTracks().forEach((t) => t.stop());
-  testStream = null;
+  closeMic(testMic);
+  testMic = null;
   loopAudio.srcObject = null;
   $('#micMeter').style.width = '0';
   $('#micTestBtn').textContent = 'Testar microfone';
 }
 
-$('#micTestBtn').onclick = () => (testStream ? stopMicTest() : startMicTest());
-$('#loopToggle').onchange = (e) => { loopAudio.srcObject = e.target.checked && testStream ? testStream : null; loopAudio.play().catch(() => {}); };
-$('#micSelect').onchange = () => { store.set('mic', $('#micSelect').value); if (testStream) { stopMicTest(); startMicTest(); } };
-$('#nsToggle').onchange = () => { store.set('ns', $('#nsToggle').checked); if (testStream) { stopMicTest(); startMicTest(); } };
+$('#micTestBtn').onclick = () => (testMic ? stopMicTest() : startMicTest());
+$('#loopToggle').onchange = (e) => { loopAudio.srcObject = e.target.checked && testMic ? testMic.stream : null; loopAudio.play().catch(() => {}); };
+$('#micSelect').onchange = () => { store.set('mic', $('#micSelect').value); if (testMic) { stopMicTest(); startMicTest(); } };
+$('#nsToggle').onchange = () => setNoise($('#nsToggle').checked);
+loadNoiseSuppressor().catch(() => {}); // adianta o download do modelo
 
 function showJoinError(text) {
   const el = $('#joinError');
@@ -313,6 +401,7 @@ function enterRoom(res, myName) {
   if (state.mic) watchLevel(state.myId, state.mic, (lvl) => setSpeaking(state.myId, micOn() && lvl > SPEAK_THRESHOLD));
   res.peers.forEach((p) => addPeer(p, true));
   updateMicBtn();
+  updateNoiseBtn();
   updateShareBtn();
   renderPeople();
   sysMsg(`Você entrou em "${res.room}".`);
@@ -327,9 +416,10 @@ function leaveRoom(reason) {
   for (const peer of state.peers.values()) closePeer(peer);
   state.peers.clear();
   state.screen?.getTracks().forEach((t) => t.stop());
-  state.mic?.getTracks().forEach((t) => t.stop());
+  closeMic(state.micChain);
   state.screen = null;
   state.mic = null;
+  state.micChain = null;
   for (const key of [...state.meters.keys()]) unwatchLevel(key);
   state.speaking.clear();
   state.tiles.clear();
@@ -901,11 +991,13 @@ const micOn = () => Boolean(state.mic?.getAudioTracks()[0]?.enabled);
 async function toggleMic() {
   if (!state.mic) {
     try {
-      state.mic = await navigator.mediaDevices.getUserMedia(micConstraints());
+      state.micChain = await openMic();
     } catch {
       toast('Microfone indisponível. Verifique a permissão do navegador.');
       return;
     }
+    if (!state.myId) { closeMic(state.micChain); state.micChain = null; return; } // saiu enquanto abria
+    state.mic = state.micChain.stream;
     // Avisa o id do stream antes de mandar as faixas, para os outros reconhecerem.
     socket.emit('state', { micStreamId: state.mic.id, muted: false });
     if (state.sfu) sfuPublishMic();
@@ -930,6 +1022,10 @@ function updateMicBtn() {
 }
 
 $('#micBtn').onclick = toggleMic;
+$('#nsBtn').onclick = () => {
+  setNoise(!noiseOn());
+  toast(noiseOn() ? 'Supressão de ruído ligada.' : 'Supressão de ruído desligada.');
+};
 
 document.addEventListener('keydown', (e) => {
   if ($('#room').hidden || e.ctrlKey || e.metaKey || e.altKey) return;

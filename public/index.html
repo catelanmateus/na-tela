@@ -53,7 +53,7 @@
             </label>
           </div>
           <label class="check">
-            <input type="checkbox" id="nsToggle" checked> Supressão de ruído e eco
+            <input type="checkbox" id="nsToggle" checked> Supressão de ruído por IA (dá para mudar na sala)
           </label>
         </div>
       </details>
@@ -108,6 +108,10 @@
       <button id="micBtn" class="ctl" title="Microfone (M)">
         <svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/><path class="slash" d="M4 4l16 16"/></svg>
         <span>Microfone</span>
+      </button>
+      <button id="nsBtn" class="ctl" aria-pressed="true" title="Supressão de ruído por IA (RNNoise): tira teclado, ventilador e barulho de fundo da sua voz">
+        <svg viewBox="0 0 24 24"><path d="M3 12h2M7 8v8M11 5v14M15 9v6M19 11v2"/><path class="slash" d="M4 4l16 16"/></svg>
+        <span>Ruído: filtrado</span>
       </button>
       <div class="share-group">
         <select id="qualitySelect" title="Qualidade da transmissão"></select>
