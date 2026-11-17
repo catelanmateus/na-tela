@@ -824,7 +824,15 @@ async function sfuPublishMic() {
   try {
     await sfu.ready;
     if (state.sfu !== sfu || state.mic?.getAudioTracks()[0] !== track || sfu.micPub) return;
-    sfu.micPub = await sfu.room.localParticipant.publishTrack(track, { source: sfu.LK.Track.Source.Microphone });
+    sfu.micPub = await sfu.room.localParticipant.publishTrack(track, {
+      source: sfu.LK.Track.Source.Microphone,
+      // O livekit-client liga o DTX por padrão: o Opus para de enviar quando acha que é
+      // silêncio. Com a supressão de ruído o fundo fica mudo e ele cortava começo e fim
+      // das palavras (a voz "picotava"). O RED continua: cobre pacotes perdidos.
+      dtx: false,
+      red: true,
+      audioPreset: { maxBitrate: 64_000 },
+    });
   } catch (err) {
     if (state.sfu !== sfu) return; // saiu da sala ou a conexão falhou (já avisado)
     console.error('publicar microfone', err);
