@@ -304,7 +304,7 @@ function enterRoom(res, myName) {
   $('#roomName').textContent = res.room;
   $('#lockIcon').hidden = !res.locked;
   history.replaceState(null, '', `?sala=${encodeURIComponent(res.room)}`);
-  document.title = `${res.room} · Na Tela`;
+  document.title = `${res.room} · Nosso Servidor`;
 
   // Definido antes de adicionar os pares: decide se a mídia vai pelo SFU ou P2P.
   if (res.livekit) startSfu(res.livekit);
@@ -341,7 +341,7 @@ function leaveRoom(reason) {
   state.myId = null;
   $('#room').hidden = true;
   $('#lobby').hidden = false;
-  document.title = 'Na Tela — transmita sua tela para os amigos';
+  document.title = 'Nosso Servidor — transmita sua tela para os amigos';
   refreshFavs();
   if (reason) toast(reason);
 }
@@ -385,8 +385,16 @@ function createTile(id, name, isSelf) {
     setFocus(state.focusId === id ? null : id);
   };
   el.ondblclick = () => toggleFullscreen(el);
+  // Em tela cheia, o nome e os controles somem com o mouse parado e voltam ao mexer.
+  let idleTimer;
+  const wake = () => {
+    el.classList.remove('idle');
+    clearTimeout(idleTimer);
+    if (document.fullscreenElement === el) idleTimer = setTimeout(() => el.classList.add('idle'), FULLSCREEN_IDLE_MS);
+  };
+  el.addEventListener('mousemove', wake);
   $('#stage').append(el);
-  state.tiles.set(id, { el, video, statsEl });
+  state.tiles.set(id, { el, video, statsEl, wake });
   updateCount();
 }
 
@@ -435,6 +443,13 @@ function toggleFullscreen(el) {
   if (document.fullscreenElement) document.exitFullscreen();
   else el.requestFullscreen?.().catch(() => {});
 }
+
+const FULLSCREEN_IDLE_MS = 2000;
+
+// Entrou ou saiu da tela cheia (inclusive pelo Esc): recomeça a contagem ou mostra tudo de novo.
+document.addEventListener('fullscreenchange', () => {
+  for (const tile of state.tiles.values()) tile.wake();
+});
 
 function updateCount() {
   const n = state.tiles.size;

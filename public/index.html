@@ -3,46 +3,48 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Na Tela — transmita sua tela para os amigos</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%237c5cff'/%3E%3Cpath d='M9 7l8 5-8 5z' fill='white'/%3E%3C/svg%3E">
+  <title>Nosso Servidor — transmita sua tela para os amigos</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%230f1411'/%3E%3Ccircle cx='12' cy='12' r='5' fill='%233ddc84'/%3E%3C/svg%3E">
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <!-- LOBBY -->
   <section id="lobby" class="lobby">
-    <header class="brand">
-      <div class="logo">
-        <svg viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/><path class="fill" d="M10 8l5 2.5-5 2.5z"/></svg>
-      </div>
-      <h1>Na Tela</h1>
-      <p>Transmita sua tela para os amigos com áudio, voz e chat — direto do navegador.</p>
-    </header>
+    <div class="lobby-intro">
+      <div class="wordmark"><span class="onair"><i></i>No ar</span>Nosso Servidor</div>
+      <h1>Sua tela, ao vivo,<br><em>pros amigos.</em></h1>
+      <p class="lede">Jogo, filme ou código: abra uma sala, mande o link e transmita com som — sem instalar nada.</p>
+      <ul class="specs">
+        <li id="featTransport"><b>WebRTC P2P</b><span>baixa latência</span></li>
+        <li><b>Até 60 FPS</b><span>até 1080p</span></li>
+        <li><b>Áudio estéreo</b><span>som do jogo</span></li>
+      </ul>
+    </div>
 
-    <div class="lobby-grid">
-      <form id="joinForm" class="card" autocomplete="off">
-        <label class="field">
-          <span>Nome da sala</span>
-          <div class="input-row">
-            <input id="roomInput" maxlength="40" placeholder="ex: jogatina-da-noite" required>
-            <button type="button" id="favBtn" class="icon-btn" title="Favoritar sala" aria-label="Favoritar sala">☆</button>
-          </div>
-        </label>
-        <label class="field">
-          <span>Seu nome</span>
-          <input id="nameInput" maxlength="30" placeholder="Como vão te chamar" required>
-        </label>
-        <label class="field">
-          <span>Senha da sala <em>(opcional)</em></span>
-          <input id="passInput" type="password" placeholder="Em branco = sala aberta" autocomplete="new-password">
-        </label>
+    <form id="joinForm" class="join-panel" autocomplete="off">
+      <h2>Entrar numa sala</h2>
+      <label class="field">
+        <span>Sala</span>
+        <div class="input-row">
+          <input id="roomInput" maxlength="40" placeholder="jogatina-da-noite" required>
+          <button type="button" id="favBtn" class="icon-btn" title="Guardar nos seus canais" aria-label="Guardar nos seus canais">☆</button>
+        </div>
+      </label>
+      <label class="field">
+        <span>Seu nome</span>
+        <input id="nameInput" maxlength="30" placeholder="Como vão te chamar" required>
+      </label>
+      <label class="field">
+        <span>Senha <em>opcional</em></span>
+        <input id="passInput" type="password" placeholder="Em branco = sala aberta" autocomplete="new-password">
+      </label>
 
-        <div class="mic-box">
-          <div class="mic-row">
-            <span class="mic-label">Microfone</span>
-            <select id="micSelect"><option value="">Padrão do sistema</option></select>
-          </div>
+      <details class="mic-box">
+        <summary>Microfone <span>você entra no mudo</span></summary>
+        <div class="mic-body">
+          <select id="micSelect" aria-label="Microfone"><option value="">Padrão do sistema</option></select>
           <div class="meter"><div id="micMeter"></div></div>
           <div class="mic-row">
             <button type="button" id="micTestBtn" class="ghost small">Testar microfone</button>
@@ -54,33 +56,22 @@
             <input type="checkbox" id="nsToggle" checked> Supressão de ruído e eco
           </label>
         </div>
+      </details>
 
-        <p id="joinError" class="error" hidden></p>
-        <button class="primary" id="joinBtn">Entrar na sala <span aria-hidden="true">→</span></button>
+      <p id="joinError" class="error" hidden></p>
+      <button class="primary" id="joinBtn">Entrar <span aria-hidden="true">→</span></button>
+    </form>
 
-        <ul class="feats">
-          <li id="featTransport"><b>WebRTC P2P</b><span>baixa latência</span></li>
-          <li><b>Até 60 FPS</b><span>até 1080p</span></li>
-          <li><b>Áudio estéreo</b><span>som do jogo</span></li>
-        </ul>
-      </form>
-
-      <aside class="card favs">
-        <div class="favs-head">
-          <div>
-            <h2>Salas favoritas</h2>
-            <p class="muted">Status ao vivo</p>
-          </div>
-          <span id="favCount" class="pill">0</span>
-        </div>
-        <ul id="favList" class="fav-list"></ul>
-        <div id="favEmpty" class="empty">
-          <div class="empty-star">☆</div>
-          <p><b>Nenhuma sala salva ainda</b></p>
-          <p class="muted">Digite o nome de uma sala e clique na ☆ para fixá-la aqui.</p>
-        </div>
-      </aside>
-    </div>
+    <section class="channels">
+      <header class="channels-head">
+        <h2>Seus canais</h2>
+        <span id="favCount" class="pill">0</span>
+      </header>
+      <ul id="favList" class="fav-list"></ul>
+      <div id="favEmpty" class="empty">
+        <p>Nenhum canal guardado. Digite o nome de uma sala e toque na ☆: ela fica aqui, mostrando quem está online e quem está ao vivo.</p>
+      </div>
+    </section>
   </section>
 
   <!-- SALA -->
@@ -120,8 +111,7 @@
       </button>
       <div class="share-group">
         <select id="qualitySelect" title="Qualidade da transmissão"></select>
-        <select id="codecSelect" title="Codec de vídeo (H.264 usa a placa de vídeo na maioria dos PCs)"></select>
-        <button id="shareBtn" class="ctl accent">
+        <select id="codecSelect" title="Codec de vídeo (H.264 usa a placa de vídeo na maioria dos PCs)"></select>        <button id="shareBtn" class="ctl accent">
           <svg viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
           <span>Transmitir tela</span>
         </button>
